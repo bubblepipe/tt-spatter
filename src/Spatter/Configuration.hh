@@ -42,6 +42,10 @@ inline void gpuAssert(
 }
 #endif
 
+#ifdef USE_TENSTORRENT
+#include "TensTorrentBackend.hh"
+#endif
+
 #include "AlignedAllocator.hh"
 #include "SpatterTypes.hh"
 #include "Timer.hh"
@@ -239,6 +243,45 @@ public:
   size_t *dev_pattern;
   size_t *dev_pattern_gather;
   size_t *dev_pattern_scatter;
+};
+#endif
+
+#ifdef USE_TENSTORRENT
+template <> class Configuration<Spatter::TensTorrent> : public ConfigurationBase {
+public:
+  Configuration(const size_t id, const std::string name,
+      const std::string kernel, const aligned_vector<size_t> &pattern,
+      const aligned_vector<size_t> &pattern_gather,
+      const aligned_vector<size_t> &pattern_scatter,
+      aligned_vector<double> &sparse, double *&dev_sparse, size_t &sparse_size,
+      aligned_vector<double> &sparse_gather, double *&dev_sparse_gather,
+      size_t &sparse_gather_size, aligned_vector<double> &sparse_scatter,
+      double *&dev_sparse_scatter, size_t &sparse_scatter_size,
+      aligned_vector<double> &dense,
+      aligned_vector<aligned_vector<double>> &dense_perthread,
+      double *&dev_dense, size_t &dense_size, const size_t delta,
+      const size_t delta_gather, const size_t delta_scatter,
+      const long int seed, const size_t wrap, const size_t count,
+      const unsigned long nruns, const bool aggregate,
+      const unsigned long verbosity);
+
+  ~Configuration();
+
+  int run(bool timed, unsigned long run_id);
+  void gather(bool timed, unsigned long run_id);
+  void scatter(bool timed, unsigned long run_id);
+  void gather_scatter(bool timed, unsigned long run_id);
+  void multi_gather(bool timed, unsigned long run_id);
+  void multi_scatter(bool timed, unsigned long run_id);
+  void setup();
+
+public:
+  std::unique_ptr<TensTorrentDevice> tt_device_;
+  std::shared_ptr<tt::tt_metal::Buffer> tt_pattern_buffer_;
+  std::shared_ptr<tt::tt_metal::Buffer> tt_pattern_gather_buffer_;
+  std::shared_ptr<tt::tt_metal::Buffer> tt_pattern_scatter_buffer_;
+  std::shared_ptr<tt::tt_metal::Buffer> tt_sparse_buffer_;
+  std::shared_ptr<tt::tt_metal::Buffer> tt_dense_buffer_;
 };
 #endif
 
