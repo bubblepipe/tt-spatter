@@ -8,6 +8,9 @@ endif()
 
 if (USE_TENSTORRENT)
     add_library(tenstorrent_backend SHARED TensTorrentBackend.cc)
+    target_compile_definitions(tenstorrent_backend PRIVATE SPDLOG_FMT_EXTERNAL=1)
+    target_compile_options(tenstorrent_backend PRIVATE -w)
+    target_link_libraries(tenstorrent_backend PUBLIC ${TT_METAL_LIBS})
     set(TENSTORRENT_INCLUDE_FILES TensTorrentBackend.hh)
 endif()
 

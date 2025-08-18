@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <tt-metalium/bfloat16.hpp>
 
+using namespace tt::tt_metal;
+
 namespace Spatter {
 
 TensTorrentDevice::TensTorrentDevice(int device_id) 
@@ -24,7 +26,7 @@ TensTorrentDevice::~TensTorrentDevice() {
 bool TensTorrentDevice::initialize() {
     try {
         // Initialize the TensTorrent device
-        device_ = tt::tt_metal::CreateDevice(device_id_);
+        device_ = CreateDevice(device_id_);
         if (!device_) {
             std::cerr << "Failed to create TensTorrent device " << device_id_ << std::endl;
             return false;
@@ -46,7 +48,7 @@ bool TensTorrentDevice::initialize() {
 
 void TensTorrentDevice::cleanup() {
     if (device_) {
-        tt::tt_metal::CloseDevice(device_);
+        CloseDevice(device_);
         device_ = nullptr;
         command_queue_ = nullptr;
     }
@@ -66,14 +68,14 @@ std::shared_ptr<tt::tt_metal::Buffer> TensTorrentDevice::allocate_buffer(size_t 
         aligned_size = ((aligned_size + DRAM_ALIGNMENT - 1) / DRAM_ALIGNMENT) * DRAM_ALIGNMENT;
     }
     
-    tt::tt_metal::InterleavedBufferConfig config{
+    InterleavedBufferConfig config{
         .device = device_,
         .size = aligned_size,
         .page_size = TILE_SIZE_BYTES,
         .buffer_type = type
     };
     
-    return tt::tt_metal::CreateBuffer(config);
+    return CreateBuffer(config);
 }
 
 void TensTorrentDevice::write_buffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
@@ -83,13 +85,13 @@ void TensTorrentDevice::write_buffer(std::shared_ptr<tt::tt_metal::Buffer> buffe
     }
     
     // Convert double to bfloat16 format
-    std::vector<tt::tt_metal::bfloat16> tt_data;
+    std::vector<bfloat16> tt_data;
     tt_data.reserve(data.size());
     for (double val : data) {
-        tt_data.push_back(tt::tt_metal::bfloat16(static_cast<float>(val)));
+        tt_data.push_back(bfloat16(static_cast<float>(val)));
     }
     
-    tt::tt_metal::EnqueueWriteBuffer(*command_queue_, buffer, tt_data, blocking);
+    EnqueueWriteBuffer(*command_queue_, buffer, tt_data, blocking);
 }
 
 void TensTorrentDevice::read_buffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
@@ -98,14 +100,14 @@ void TensTorrentDevice::read_buffer(std::shared_ptr<tt::tt_metal::Buffer> buffer
         throw std::runtime_error("TensTorrent device not initialized");
     }
     
-    std::vector<tt::tt_metal::bfloat16> tt_data;
-    tt::tt_metal::EnqueueReadBuffer(*command_queue_, buffer, tt_data, blocking);
+    std::vector<bfloat16> tt_data;
+    EnqueueReadBuffer(*command_queue_, buffer, tt_data, blocking);
     
     // Convert bfloat16 back to double
     data.clear();
     data.reserve(tt_data.size());
     for (const auto& val : tt_data) {
-        data.push_back(static_cast<double>(static_cast<float>(val)));
+        data.push_back(static_cast<double>(val.to_float()));
     }
 }
 
@@ -131,12 +133,12 @@ void TensTorrentDevice::execute_gather_kernel(
         l1_buffer->address()
     };
     
-    tt::tt_metal::CoreCoord core = get_default_core();
-    tt::tt_metal::SetRuntimeArgs(gather_program_, gather_kernel_handle_, core, runtime_args);
+    CoreCoord core = get_default_core();
+    SetRuntimeArgs(gather_program_, gather_kernel_handle_, core, runtime_args);
     
     // Execute the program
-    tt::tt_metal::EnqueueProgram(*command_queue_, gather_program_, false);
-    tt::tt_metal::Finish(*command_queue_);
+    EnqueueProgram(*command_queue_, gather_program_, false);
+    Finish(*command_queue_);
 }
 
 void TensTorrentDevice::execute_scatter_kernel(
@@ -169,21 +171,21 @@ size_t TensTorrentDevice::get_max_memory() const {
 
 void TensTorrentDevice::compile_kernels() {
     // Create gather program
-    gather_program_ = tt::tt_metal::CreateProgram();
+    gather_program_ = CreateProgram();
     
-    tt::tt_metal::CoreCoord core = get_default_core();
+    CoreCoord core = get_default_core();
     
     // Create gather kernel
     std::vector<uint32_t> compile_args;
     // Add any compile-time arguments here
     
-    gather_kernel_handle_ = tt::tt_metal::CreateKernel(
+    gather_kernel_handle_ = CreateKernel(
         gather_program_,
         "src/Spatter/kernels/gather_kernel.cpp",
         core,
-        tt::tt_metal::DataMovementConfig{
-            .processor = tt::tt_metal::DataMovementProcessor::RISCV_0,
-            .noc = tt::tt_metal::NOC::RISCV_0_default,
+        DataMovementConfig{
+            .processor = DataMovementProcessor::RISCV_0,
+            .noc = NOC::RISCV_0_default,
             .compile_args = compile_args
         }
     );
@@ -220,7 +222,7 @@ void check_tt_error(const std::string& operation) {
 }
 
 size_t calculate_buffer_size(size_t num_elements) {
-    const size_t element_size = sizeof(tt::tt_metal::bfloat16);
+    const size_t element_size = sizeof(bfloat16);
     const size_t tile_size = 32 * 32 * element_size;
     size_t total_size = num_elements * element_size;
     
@@ -228,7 +230,7 @@ size_t calculate_buffer_size(size_t num_elements) {
     return ((total_size + tile_size - 1) / tile_size) * tile_size;
 }
 
-tt::tt_metal::CoreCoord get_default_core() {
+CoreCoord get_default_core() {
     return {0, 0};  // Use core (0,0) as default
 }
 

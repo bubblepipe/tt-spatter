@@ -921,4 +921,147 @@ void Configuration<Spatter::CUDA>::setup() {
 }
 #endif
 
+#ifdef USE_TENSTORRENT
+Configuration<Spatter::TensTorrent>::Configuration(const size_t id,
+    const std::string name, const std::string kernel,
+    const aligned_vector<size_t> &pattern,
+    const aligned_vector<size_t> &pattern_gather,
+    const aligned_vector<size_t> &pattern_scatter,
+    aligned_vector<double> &sparse, double *&dev_sparse, size_t &sparse_size,
+    aligned_vector<double> &sparse_gather, double *&dev_sparse_gather,
+    size_t &sparse_gather_size, aligned_vector<double> &sparse_scatter,
+    double *&dev_sparse_scatter, size_t &sparse_scatter_size,
+    aligned_vector<double> &dense,
+    aligned_vector<aligned_vector<double>> &dense_perthread,
+    double *&dev_dense, size_t &dense_size, const size_t delta,
+    const size_t delta_gather, const size_t delta_scatter,
+    const long int seed, const size_t wrap, const size_t count,
+    const unsigned long nruns, const bool aggregate,
+    const unsigned long verbosity)
+    : ConfigurationBase(id, name, kernel, pattern, pattern_gather,
+          pattern_scatter, sparse, dev_sparse, sparse_size, sparse_gather,
+          dev_sparse_gather, sparse_gather_size, sparse_scatter,
+          dev_sparse_scatter, sparse_scatter_size, dense, dense_perthread,
+          dev_dense, dense_size, delta, delta_gather,
+          delta_scatter, seed, wrap, count, 0, 1024, 1, nruns, aggregate, false,
+          false, false, verbosity) {
+    // Initialize TensTorrent device
+    tt_device_ = std::make_unique<TensTorrentDevice>(0);
+    if (!tt_device_->initialize()) {
+        throw std::runtime_error("Failed to initialize TensTorrent device");
+    }
+    ConfigurationBase::setup();
+}
+
+Configuration<Spatter::TensTorrent>::~Configuration() {
+    // Cleanup will be handled by unique_ptr
+}
+
+int Configuration<Spatter::TensTorrent>::run(bool timed, unsigned long run_id) {
+    // Call the appropriate kernel based on the kernel name
+    if (kernel.compare("gather") == 0) {
+        gather(timed, run_id);
+    } else if (kernel.compare("scatter") == 0) {
+        scatter(timed, run_id);
+    } else if (kernel.compare("gs") == 0) {
+        gather_scatter(timed, run_id);
+    } else if (kernel.compare("multigather") == 0) {
+        multi_gather(timed, run_id);
+    } else if (kernel.compare("multiscatter") == 0) {
+        multi_scatter(timed, run_id);
+    }
+    return 0;
+}
+
+void Configuration<Spatter::TensTorrent>::setup() {
+    // Setup TensTorrent buffers - placeholder for now
+}
+
+void Configuration<Spatter::TensTorrent>::gather(bool timed, unsigned long run_id) {
+    // For now, fall back to serial implementation
+    // TODO: Implement actual TensTorrent gather kernel execution
+    size_t pattern_length = this->pattern.size();
+    
+    if (timed)
+        this->timer.start();
+    
+    for (size_t i = 0; i < this->count; ++i)
+        for (size_t j = 0; j < pattern_length; ++j)
+            this->dense[j + pattern_length * (i % this->wrap)] = this->sparse[this->pattern[j] + this->delta * i];
+    
+    if (timed) {
+        this->timer.stop();
+        this->time_seconds.emplace_back(this->timer.seconds());
+    }
+}
+
+void Configuration<Spatter::TensTorrent>::scatter(bool timed, unsigned long run_id) {
+    // For now, fall back to serial implementation
+    // TODO: Implement actual TensTorrent scatter kernel execution
+    size_t pattern_length = pattern.size();
+    
+    if (timed)
+        this->timer.start();
+    
+    for (size_t i = 0; i < this->count; ++i)
+        for (size_t j = 0; j < pattern_length; ++j)
+            this->sparse[this->pattern[j] + this->delta * i] = this->dense[j + pattern_length * (i % this->wrap)];
+    
+    if (timed) {
+        this->timer.stop();
+        this->time_seconds.emplace_back(this->timer.seconds());
+    }
+}
+
+void Configuration<Spatter::TensTorrent>::gather_scatter(bool timed, unsigned long run_id) {
+    // For now, fall back to serial implementation
+    // TODO: Implement actual TensTorrent gather-scatter kernel execution
+    size_t pattern_scatter_length = pattern_scatter.size();
+    size_t pattern_gather_length = pattern_gather.size();
+    
+    if (timed)
+        this->timer.start();
+    
+    for (size_t i = 0; i < this->count; ++i)
+        for (size_t j = 0; j < pattern_scatter_length; ++j)
+            this->sparse_scatter[this->pattern_scatter[j] + this->delta_scatter * i] = 
+                this->sparse_gather[this->pattern_gather[j] + this->delta_gather * i];
+    
+    if (timed) {
+        this->timer.stop();
+        this->time_seconds.emplace_back(this->timer.seconds());
+    }
+}
+
+void Configuration<Spatter::TensTorrent>::multi_gather(bool timed, unsigned long run_id) {
+    // For now, fall back to serial implementation
+    // TODO: Implement actual TensTorrent multi-gather kernel execution
+    if (timed)
+        this->timer.start();
+    
+    // Simple placeholder implementation
+    gather(false, run_id);
+    
+    if (timed) {
+        this->timer.stop();
+        this->time_seconds.emplace_back(this->timer.seconds());
+    }
+}
+
+void Configuration<Spatter::TensTorrent>::multi_scatter(bool timed, unsigned long run_id) {
+    // For now, fall back to serial implementation
+    // TODO: Implement actual TensTorrent multi-scatter kernel execution
+    if (timed)
+        this->timer.start();
+    
+    // Simple placeholder implementation
+    scatter(false, run_id);
+    
+    if (timed) {
+        this->timer.stop();
+        this->time_seconds.emplace_back(this->timer.seconds());
+    }
+}
+#endif // USE_TENSTORRENT
+
 } // namespace Spatter

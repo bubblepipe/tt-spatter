@@ -73,7 +73,7 @@ private:
     // Constants
     static constexpr size_t TILE_WIDTH = 32;
     static constexpr size_t TILE_HEIGHT = 32;
-    static constexpr size_t TILE_SIZE_BYTES = TILE_WIDTH * TILE_HEIGHT * sizeof(tt::tt_metal::bfloat16);
+    static constexpr size_t TILE_SIZE_BYTES = TILE_WIDTH * TILE_HEIGHT * sizeof(bfloat16);
     static constexpr size_t DRAM_ALIGNMENT = 64; // Blackhole requires 64B alignment
 };
 
