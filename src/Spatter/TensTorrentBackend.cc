@@ -84,11 +84,25 @@ void TensTorrentDevice::write_buffer(std::shared_ptr<tt::tt_metal::Buffer> buffe
         throw std::runtime_error("TensTorrent device not initialized");
     }
     
-    // Convert double to bfloat16 format
+    // Store the original size for later reads
+    buffer_sizes_[buffer] = data.size();
+    std::cout << "DEBUG: write_buffer storing size " << data.size() << " for buffer" << std::endl;
+    
+    // Convert double to bfloat16 format and pad to tile alignment if needed
+    size_t tile_elements = TILE_SIZE_BYTES / sizeof(bfloat16); // 1024 elements per tile
+    size_t aligned_size = ((data.size() + tile_elements - 1) / tile_elements) * tile_elements;
+    
     std::vector<bfloat16> tt_data;
-    tt_data.reserve(data.size());
-    for (double val : data) {
-        tt_data.push_back(bfloat16(static_cast<float>(val)));
+    tt_data.reserve(aligned_size);
+    
+    // Copy actual data
+    for (size_t i = 0; i < data.size(); ++i) {
+        tt_data.push_back(bfloat16(static_cast<float>(data[i])));
+    }
+    
+    // Pad with zeros to tile alignment
+    for (size_t i = data.size(); i < aligned_size; ++i) {
+        tt_data.push_back(bfloat16(0.0f));
     }
     
     EnqueueWriteBuffer(*command_queue_, buffer, tt_data, blocking);
@@ -103,11 +117,21 @@ void TensTorrentDevice::read_buffer(std::shared_ptr<tt::tt_metal::Buffer> buffer
     std::vector<bfloat16> tt_data;
     EnqueueReadBuffer(*command_queue_, buffer, tt_data, blocking);
     
-    // Convert bfloat16 back to double
+    // Get the original size that was written
+    size_t original_size = tt_data.size();
+    std::cout << "DEBUG: read_buffer tt_data.size() = " << tt_data.size() << std::endl;
+    if (buffer_sizes_.find(buffer) != buffer_sizes_.end()) {
+        original_size = buffer_sizes_[buffer];
+        std::cout << "DEBUG: read_buffer found stored size " << original_size << std::endl;
+    } else {
+        std::cout << "DEBUG: read_buffer buffer not found in map, using tt_data.size()" << std::endl;
+    }
+    
+    // Convert bfloat16 back to double, only for the original size
     data.clear();
-    data.reserve(tt_data.size());
-    for (const auto& val : tt_data) {
-        data.push_back(static_cast<double>(val.to_float()));
+    data.reserve(original_size);
+    for (size_t i = 0; i < std::min(original_size, tt_data.size()); ++i) {
+        data.push_back(static_cast<double>(tt_data[i].to_float()));
     }
 }
 
@@ -181,7 +205,7 @@ void TensTorrentDevice::compile_kernels() {
     
     gather_kernel_handle_ = CreateKernel(
         gather_program_,
-        "src/Spatter/kernels/gather_kernel.cpp",
+        "/storage/tt/tt-spatter/src/Spatter/kernels/gather_kernel.cpp",
         core,
         DataMovementConfig{
             .processor = DataMovementProcessor::RISCV_0,

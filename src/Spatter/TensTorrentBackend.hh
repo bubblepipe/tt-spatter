@@ -10,6 +10,7 @@
 #include <memory>
 #include <vector>
 #include <string>
+#include <map>
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/device.hpp>
 
@@ -63,6 +64,9 @@ private:
     tt::tt_metal::Program scatter_program_;
     tt::tt_metal::KernelHandle gather_kernel_handle_;
     tt::tt_metal::KernelHandle scatter_kernel_handle_;
+    
+    // Buffer size tracking for reads
+    std::map<std::shared_ptr<tt::tt_metal::Buffer>, size_t> buffer_sizes_;
     
     // Helper methods
     void compile_kernels();
