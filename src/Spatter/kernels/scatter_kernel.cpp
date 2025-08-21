@@ -6,22 +6,22 @@
 #include "dataflow_api.h"
 
 /*
- * Gather Kernel for Spatter TensTorrent Backend
+ * Scatter Kernel for Spatter TensTorrent Backend
  * 
- * Implements: dense[j] = sparse[pattern[j] + delta * i]
+ * Implements: sparse[pattern[j] + delta * i] = dense[j]
  * 
  * Runtime Args:
- * - arg0: src_buffer_addr - Source (sparse) buffer address in DRAM
- * - arg1: dst_buffer_addr - Destination (dense) buffer address in DRAM  
+ * - arg0: src_buffer_addr - Source (dense) buffer address in DRAM
+ * - arg1: dst_buffer_addr - Destination (sparse) buffer address in DRAM  
  * - arg2: pattern_buffer_addr - Pattern array buffer address in DRAM
- * - arg3: num_elements - Number of elements to gather
+ * - arg3: num_elements - Number of elements to scatter
  * - arg4: delta - Stride parameter for iterations
  */
 
 void kernel_main() {
     // Get kernel arguments
-    uint32_t src_buffer_addr = get_arg_val<uint32_t>(0);
-    uint32_t dst_buffer_addr = get_arg_val<uint32_t>(1);
+    uint32_t src_buffer_addr = get_arg_val<uint32_t>(0);    // dense buffer
+    uint32_t dst_buffer_addr = get_arg_val<uint32_t>(1);    // sparse buffer
     uint32_t pattern_buffer_addr = get_arg_val<uint32_t>(2);
     uint32_t num_elements = get_arg_val<uint32_t>(3);
     uint32_t delta = get_arg_val<uint32_t>(4);
@@ -42,8 +42,8 @@ void kernel_main() {
     
     // L1 buffer layout:
     // 0x10000: pattern data tile
-    // 0x10800: source data tile  
-    // 0x11000: destination data tile
+    // 0x10800: source data tile (dense)
+    // 0x11000: destination data tile (sparse)
     uint32_t pattern_l1_addr = l1_buffer_base;
     uint32_t src_l1_addr = l1_buffer_base + tile_size_bytes;
     uint32_t dst_l1_addr = l1_buffer_base + 2 * tile_size_bytes;
@@ -59,37 +59,37 @@ void kernel_main() {
         noc_async_read_page(tile_idx, pattern_accessor, pattern_l1_addr);
         noc_async_read_barrier();
         
-        // Read destination tile (for partial updates)
-        noc_async_read_page(tile_idx, dst_accessor, dst_l1_addr);
+        // Read source tile (dense data to scatter)
+        noc_async_read_page(tile_idx, src_accessor, src_l1_addr);
         noc_async_read_barrier();
         
         // Cast L1 buffers to appropriate types
         uint32_t* pattern_data = reinterpret_cast<uint32_t*>(pattern_l1_addr);
-        uint16_t* dst_data = reinterpret_cast<uint16_t*>(dst_l1_addr); // BFloat16
+        uint16_t* src_data = reinterpret_cast<uint16_t*>(src_l1_addr); // BFloat16
         
         // Process each element in the tile
         for (uint32_t elem_idx = 0; elem_idx < elements_in_tile; elem_idx++) {
             uint32_t global_elem_idx = tile_idx * elements_per_tile + elem_idx;
             uint32_t pattern_index = pattern_data[elem_idx];
-            uint32_t src_index = pattern_index + delta * (global_elem_idx / elements_per_tile);
+            uint32_t dst_index = pattern_index + delta * (global_elem_idx / elements_per_tile);
             
-            // Calculate which source tile we need
-            uint32_t src_tile_idx = src_index / elements_per_tile;
-            uint32_t src_elem_offset = src_index % elements_per_tile;
+            // Calculate which destination tile we need to update
+            uint32_t dst_tile_idx = dst_index / elements_per_tile;
+            uint32_t dst_elem_offset = dst_index % elements_per_tile;
             
-            // Read source tile if needed (cache optimization can be added later)
-            noc_async_read_page(src_tile_idx, src_accessor, src_l1_addr);
+            // Read destination tile (sparse buffer)
+            noc_async_read_page(dst_tile_idx, dst_accessor, dst_l1_addr);
             noc_async_read_barrier();
             
-            uint16_t* src_data = reinterpret_cast<uint16_t*>(src_l1_addr);
+            uint16_t* dst_data = reinterpret_cast<uint16_t*>(dst_l1_addr);
             
-            // Perform gather operation: dense[j] = sparse[pattern[j] + delta * i]
-            dst_data[elem_idx] = src_data[src_elem_offset];
+            // Perform scatter operation: sparse[pattern[j] + delta * i] = dense[j]
+            dst_data[dst_elem_offset] = src_data[elem_idx];
+            
+            // Write back the updated destination tile
+            noc_async_write_page(dst_tile_idx, dst_accessor, dst_l1_addr);
+            noc_async_write_barrier();
         }
-        
-        // Write back the updated destination tile
-        noc_async_write_page(tile_idx, dst_accessor, dst_l1_addr);
-        noc_async_write_barrier();
     }
     
     // Invalidate L1 cache for Blackhole architecture

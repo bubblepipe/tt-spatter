@@ -8,6 +8,7 @@
 
 #include <iostream>
 #include <stdexcept>
+#include "AlignedAllocator.hh"
 #include <algorithm>
 #include <tt-metalium/bfloat16.hpp>
 
@@ -78,6 +79,12 @@ std::shared_ptr<tt::tt_metal::Buffer> TensTorrentDevice::allocate_buffer(size_t 
     return CreateBuffer(config);
 }
 
+std::shared_ptr<tt::tt_metal::Buffer> TensTorrentDevice::createBuffer(size_t size_bytes, 
+                                                                      tt::tt_metal::BufferType type) {
+    // Wrapper method for consistency with Configuration naming
+    return allocate_buffer(size_bytes, type);
+}
+
 void TensTorrentDevice::write_buffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
                                      const std::vector<double>& data, bool blocking) {
     if (!initialized_) {
@@ -135,6 +142,69 @@ void TensTorrentDevice::read_buffer(std::shared_ptr<tt::tt_metal::Buffer> buffer
     }
 }
 
+void TensTorrentDevice::readBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
+                                   std::vector<double>& data, bool blocking) {
+    // Wrapper method for consistency with Configuration naming
+    read_buffer(buffer, data, blocking);
+}
+
+void TensTorrentDevice::writeBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
+                                    const std::vector<double>& data, bool blocking) {
+    // Wrapper method for consistency with Configuration naming
+    write_buffer(buffer, data, blocking);
+}
+
+void TensTorrentDevice::writeBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
+                                    const std::vector<uint32_t>& data, bool blocking) {
+    if (!initialized_) {
+        throw std::runtime_error("TensTorrent device not initialized");
+    }
+    
+    // Store the original size for later reads
+    buffer_sizes_[buffer] = data.size();
+    
+    // Align data to tile boundary with zero padding
+    constexpr size_t elements_per_tile = 32 * 32; // 1024 elements per tile
+    size_t aligned_size = ((data.size() + elements_per_tile - 1) / elements_per_tile) * elements_per_tile;
+    
+    std::vector<uint32_t> aligned_data = data;
+    aligned_data.resize(aligned_size, 0); // Pad with zeros
+    
+    EnqueueWriteBuffer(*command_queue_, buffer, aligned_data, blocking);
+}
+
+void TensTorrentDevice::writeBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
+                                    const aligned_vector<double>& data, bool blocking) {
+    // Convert aligned_vector<double> to std::vector<double> and use existing method
+    std::vector<double> std_data(data.begin(), data.end());
+    write_buffer(buffer, std_data, blocking);
+}
+
+void TensTorrentDevice::writeBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
+                                    const aligned_vector<size_t>& data, bool blocking) {
+    // Convert aligned_vector<size_t> to std::vector<uint32_t> for TT-Metal
+    std::vector<uint32_t> uint32_data;
+    uint32_data.reserve(data.size());
+    for (size_t val : data) {
+        uint32_data.push_back(static_cast<uint32_t>(val));
+    }
+    writeBuffer(buffer, uint32_data, blocking);
+}
+
+void TensTorrentDevice::readBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
+                                   aligned_vector<double>& data, bool blocking) {
+    // Use existing read_buffer and convert result to aligned_vector
+    std::vector<double> std_data;
+    read_buffer(buffer, std_data, blocking);
+    
+    // Copy to aligned_vector
+    data.clear();
+    data.reserve(std_data.size());
+    for (double val : std_data) {
+        data.push_back(val);
+    }
+}
+
 void TensTorrentDevice::execute_gather_kernel(
     std::shared_ptr<tt::tt_metal::Buffer> src_buffer,
     std::shared_ptr<tt::tt_metal::Buffer> dst_buffer,
@@ -165,6 +235,78 @@ void TensTorrentDevice::execute_gather_kernel(
     Finish(*command_queue_);
 }
 
+bool TensTorrentDevice::executeGatherKernel(
+    std::shared_ptr<tt::tt_metal::Buffer> src_buffer,
+    std::shared_ptr<tt::tt_metal::Buffer> dst_buffer,
+    std::shared_ptr<tt::tt_metal::Buffer> pattern_buffer,
+    uint32_t num_elements,
+    uint32_t delta) {
+    
+    if (!initialized_) {
+        return false;
+    }
+    
+    try {
+        // Set up runtime arguments for gather kernel
+        std::vector<uint32_t> runtime_args = {
+            src_buffer->address(),      // arg0: src_buffer_addr
+            dst_buffer->address(),      // arg1: dst_buffer_addr  
+            pattern_buffer->address(),  // arg2: pattern_buffer_addr
+            num_elements,               // arg3: num_elements
+            delta                       // arg4: delta stride
+        };
+        
+        // Set runtime arguments
+        SetRuntimeArgs(gather_program_, gather_kernel_handle_, get_default_core(), runtime_args);
+        
+        // Execute the program
+        EnqueueProgram(*command_queue_, gather_program_, false);
+        Finish(*command_queue_);
+        
+        return true;
+        
+    } catch (const std::exception& e) {
+        std::cerr << "TensTorrent gather kernel execution failed: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+bool TensTorrentDevice::executeScatterKernel(
+    std::shared_ptr<tt::tt_metal::Buffer> src_buffer,
+    std::shared_ptr<tt::tt_metal::Buffer> dst_buffer,
+    std::shared_ptr<tt::tt_metal::Buffer> pattern_buffer,
+    uint32_t num_elements,
+    uint32_t delta) {
+    
+    if (!initialized_) {
+        return false;
+    }
+    
+    try {
+        // Set up runtime arguments for scatter kernel
+        std::vector<uint32_t> runtime_args = {
+            src_buffer->address(),      // arg0: src_buffer_addr (dense)
+            dst_buffer->address(),      // arg1: dst_buffer_addr (sparse)
+            pattern_buffer->address(),  // arg2: pattern_buffer_addr
+            num_elements,               // arg3: num_elements
+            delta                       // arg4: delta stride
+        };
+        
+        // Set runtime arguments for scatter program
+        SetRuntimeArgs(scatter_program_, scatter_kernel_handle_, get_default_core(), runtime_args);
+        
+        // Execute the program
+        EnqueueProgram(*command_queue_, scatter_program_, false);
+        Finish(*command_queue_);
+        
+        return true;
+        
+    } catch (const std::exception& e) {
+        std::cerr << "TensTorrent scatter kernel execution failed: " << e.what() << std::endl;
+        return false;
+    }
+}
+
 void TensTorrentDevice::execute_scatter_kernel(
     std::shared_ptr<tt::tt_metal::Buffer> src_buffer,
     std::shared_ptr<tt::tt_metal::Buffer> dst_buffer,
@@ -178,6 +320,34 @@ void TensTorrentDevice::execute_scatter_kernel(
     // Similar implementation to gather but with scatter logic
     // For now, throw as not implemented
     throw std::runtime_error("Scatter kernel not yet implemented");
+}
+
+void TensTorrentDevice::execute_noc_bandwidth_kernel(
+    std::shared_ptr<tt::tt_metal::Buffer> src_buffer,
+    std::shared_ptr<tt::tt_metal::Buffer> dst_buffer,
+    size_t num_tiles,
+    uint32_t neighbor_x,
+    uint32_t neighbor_y) {
+    
+    if (!initialized_) {
+        throw std::runtime_error("TensTorrent device not initialized");
+    }
+    
+    // Set runtime arguments for NOC bandwidth kernel
+    std::vector<uint32_t> runtime_args = {
+        static_cast<uint32_t>(src_buffer->address()),  // Source buffer address
+        static_cast<uint32_t>(dst_buffer->address()),  // Destination buffer address  
+        static_cast<uint32_t>(num_tiles),              // Number of tiles to transfer
+        neighbor_x,                                    // Neighbor NOC X coordinate
+        neighbor_y                                     // Neighbor NOC Y coordinate
+    };
+    
+    auto core = get_default_core();
+    SetRuntimeArgs(noc_bandwidth_program_, noc_bandwidth_kernel_handle_, core, runtime_args);
+    
+    // Execute the NOC bandwidth kernel
+    EnqueueProgram(*command_queue_, noc_bandwidth_program_, false);
+    Finish(*command_queue_);
 }
 
 std::string TensTorrentDevice::get_device_info() const {
@@ -214,7 +384,35 @@ void TensTorrentDevice::compile_kernels() {
         }
     );
     
-    // TODO: Compile scatter and other kernels
+    // Create scatter program
+    scatter_program_ = CreateProgram();
+    
+    scatter_kernel_handle_ = CreateKernel(
+        scatter_program_,
+        "/storage/tt/tt-spatter/src/Spatter/kernels/scatter_kernel.cpp",
+        core,
+        DataMovementConfig{
+            .processor = DataMovementProcessor::RISCV_0,
+            .noc = NOC::RISCV_0_default,
+            .compile_args = compile_args
+        }
+    );
+    
+    // Create NOC bandwidth program  
+    noc_bandwidth_program_ = CreateProgram();
+    
+    noc_bandwidth_kernel_handle_ = CreateKernel(
+        noc_bandwidth_program_,
+        "/storage/tt/tt-spatter/src/Spatter/kernels/noc_bandwidth_kernel.cpp",
+        core,
+        DataMovementConfig{
+            .processor = DataMovementProcessor::RISCV_0,
+            .noc = NOC::RISCV_0_default,
+            .compile_args = compile_args
+        }
+    );
+    
+    // TODO: Compile gather-scatter and multi kernels
 }
 
 size_t TensTorrentDevice::align_to_tile_size(size_t size) const {

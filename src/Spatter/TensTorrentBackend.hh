@@ -14,6 +14,13 @@
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/device.hpp>
 
+// Forward declaration for aligned_vector - definition is in Configuration.hh
+template <typename T, size_t Alignment>
+class aligned_allocator;
+
+template <typename T>
+using aligned_vector = std::vector<T, aligned_allocator<T, 64>>;
+
 namespace Spatter {
 
 class TensTorrentDevice {
@@ -29,12 +36,27 @@ public:
     // Memory management
     std::shared_ptr<tt::tt_metal::Buffer> allocate_buffer(size_t size_bytes, 
                                                           tt::tt_metal::BufferType type = tt::tt_metal::BufferType::DRAM);
+    std::shared_ptr<tt::tt_metal::Buffer> createBuffer(size_t size_bytes, 
+                                                       tt::tt_metal::BufferType type = tt::tt_metal::BufferType::DRAM);
     
     // Data transfer
     void write_buffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
                       const std::vector<double>& data, bool blocking = true);
     void read_buffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
                      std::vector<double>& data, bool blocking = true);
+                     
+    void readBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
+                    std::vector<double>& data, bool blocking = true);
+    void readBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
+                    aligned_vector<double>& data, bool blocking = true);
+    void writeBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
+                     const std::vector<double>& data, bool blocking = true);
+    void writeBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
+                     const std::vector<uint32_t>& data, bool blocking = true);
+    void writeBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
+                     const aligned_vector<double>& data, bool blocking = true);
+    void writeBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
+                     const aligned_vector<size_t>& data, bool blocking = true);
     
     // Kernel execution
     void execute_gather_kernel(
@@ -43,11 +65,32 @@ public:
         std::shared_ptr<tt::tt_metal::Buffer> pattern_buffer,
         size_t num_elements);
         
+    bool executeGatherKernel(
+        std::shared_ptr<tt::tt_metal::Buffer> src_buffer,
+        std::shared_ptr<tt::tt_metal::Buffer> dst_buffer,
+        std::shared_ptr<tt::tt_metal::Buffer> pattern_buffer,
+        uint32_t num_elements,
+        uint32_t delta);
+        
     void execute_scatter_kernel(
         std::shared_ptr<tt::tt_metal::Buffer> src_buffer,
         std::shared_ptr<tt::tt_metal::Buffer> dst_buffer,
         std::shared_ptr<tt::tt_metal::Buffer> pattern_buffer,
         size_t num_elements);
+        
+    bool executeScatterKernel(
+        std::shared_ptr<tt::tt_metal::Buffer> src_buffer,
+        std::shared_ptr<tt::tt_metal::Buffer> dst_buffer,
+        std::shared_ptr<tt::tt_metal::Buffer> pattern_buffer,
+        uint32_t num_elements,
+        uint32_t delta);
+        
+    void execute_noc_bandwidth_kernel(
+        std::shared_ptr<tt::tt_metal::Buffer> src_buffer,
+        std::shared_ptr<tt::tt_metal::Buffer> dst_buffer,
+        size_t num_tiles,
+        uint32_t neighbor_x,
+        uint32_t neighbor_y);
     
     // Device information
     std::string get_device_info() const;
@@ -62,8 +105,10 @@ private:
     // Kernel programs
     tt::tt_metal::Program gather_program_;
     tt::tt_metal::Program scatter_program_;
+    tt::tt_metal::Program noc_bandwidth_program_;
     tt::tt_metal::KernelHandle gather_kernel_handle_;
     tt::tt_metal::KernelHandle scatter_kernel_handle_;
+    tt::tt_metal::KernelHandle noc_bandwidth_kernel_handle_;
     
     // Buffer size tracking for reads
     std::map<std::shared_ptr<tt::tt_metal::Buffer>, size_t> buffer_sizes_;

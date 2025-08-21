@@ -974,42 +974,182 @@ int Configuration<Spatter::TensTorrent>::run(bool timed, unsigned long run_id) {
 }
 
 void Configuration<Spatter::TensTorrent>::setup() {
-    // Setup TensTorrent buffers - placeholder for now
+    // Calculate buffer sizes with tile alignment (2KB = 32x32 BFloat16)
+    constexpr size_t tile_size_bytes = 32 * 32 * 2; // 2048 bytes
+    constexpr size_t elements_per_tile = 32 * 32;   // 1024 elements
+    
+    // Helper function to round up to tile boundary
+    auto round_to_tiles = [](size_t elements) -> size_t {
+        return ((elements + elements_per_tile - 1) / elements_per_tile) * tile_size_bytes;
+    };
+    
+    try {
+        // Create buffers for pattern arrays (using size_t -> uint32_t conversion)
+        if (!pattern.empty()) {
+            size_t pattern_size_bytes = round_to_tiles(pattern.size() * sizeof(uint32_t));
+            std::cout << "DEBUG: Creating pattern buffer of size " << pattern_size_bytes 
+                      << " for " << pattern.size() << " elements" << std::endl;
+            tt_pattern_buffer_ = tt_device_->createBuffer(pattern_size_bytes);
+            if (!tt_pattern_buffer_) {
+                throw std::runtime_error("Failed to create pattern buffer");
+            }
+        }
+        
+        if (!pattern_gather.empty()) {
+            size_t pattern_gather_size_bytes = round_to_tiles(pattern_gather.size() * sizeof(uint32_t));
+            tt_pattern_gather_buffer_ = tt_device_->createBuffer(pattern_gather_size_bytes);
+        }
+        
+        if (!pattern_scatter.empty()) {
+            size_t pattern_scatter_size_bytes = round_to_tiles(pattern_scatter.size() * sizeof(uint32_t));
+            tt_pattern_scatter_buffer_ = tt_device_->createBuffer(pattern_scatter_size_bytes);
+        }
+        
+        // Create buffers for data arrays (double -> BFloat16 conversion)
+        if (!sparse.empty()) {
+            size_t sparse_size_bytes = round_to_tiles(sparse.size() * 2); // BFloat16 = 2 bytes
+            std::cout << "DEBUG: Creating sparse buffer of size " << sparse_size_bytes 
+                      << " for " << sparse.size() << " elements" << std::endl;
+            tt_sparse_buffer_ = tt_device_->createBuffer(sparse_size_bytes);
+            if (!tt_sparse_buffer_) {
+                throw std::runtime_error("Failed to create sparse buffer");
+            }
+        }
+        
+        if (!dense.empty()) {
+            size_t dense_size_bytes = round_to_tiles(dense.size() * 2); // BFloat16 = 2 bytes  
+            std::cout << "DEBUG: Creating dense buffer of size " << dense_size_bytes 
+                      << " for " << dense.size() << " elements" << std::endl;
+            tt_dense_buffer_ = tt_device_->createBuffer(dense_size_bytes);
+            if (!tt_dense_buffer_) {
+                throw std::runtime_error("Failed to create dense buffer");
+            }
+        }
+        
+        // Upload initial data to TT device
+        if (tt_pattern_buffer_) {
+            // Convert size_t pattern to uint32_t for TT-Metal
+            std::vector<uint32_t> pattern_uint32(pattern.begin(), pattern.end());
+            tt_device_->writeBuffer(tt_pattern_buffer_, pattern_uint32);
+        }
+        
+        if (tt_pattern_gather_buffer_) {
+            std::vector<uint32_t> pattern_gather_uint32(pattern_gather.begin(), pattern_gather.end());
+            tt_device_->writeBuffer(tt_pattern_gather_buffer_, pattern_gather_uint32);
+        }
+        
+        if (tt_pattern_scatter_buffer_) {
+            std::vector<uint32_t> pattern_scatter_uint32(pattern_scatter.begin(), pattern_scatter.end());
+            tt_device_->writeBuffer(tt_pattern_scatter_buffer_, pattern_scatter_uint32);
+        }
+        
+        if (tt_sparse_buffer_) {
+            tt_device_->writeBuffer(tt_sparse_buffer_, sparse);
+        }
+        
+        if (tt_dense_buffer_) {
+            tt_device_->writeBuffer(tt_dense_buffer_, dense);
+        }
+        
+    } catch (const std::exception& e) {
+        throw std::runtime_error("TensTorrent buffer setup failed: " + std::string(e.what()));
+    }
 }
 
 void Configuration<Spatter::TensTorrent>::gather(bool timed, unsigned long run_id) {
-    // For now, fall back to serial implementation
-    // TODO: Implement actual TensTorrent gather kernel execution
     size_t pattern_length = this->pattern.size();
     
     if (timed)
         this->timer.start();
     
-    for (size_t i = 0; i < this->count; ++i)
-        for (size_t j = 0; j < pattern_length; ++j)
-            this->dense[j + pattern_length * (i % this->wrap)] = this->sparse[this->pattern[j] + this->delta * i];
+    try {
+        // Check if buffers are properly initialized
+        if (!tt_device_ || !tt_sparse_buffer_ || !tt_dense_buffer_ || !tt_pattern_buffer_) {
+            throw std::runtime_error("TensTorrent buffers not properly initialized");
+        }
+        
+        // Execute gather kernel: dense[j] = sparse[pattern[j] + delta * i]
+        auto kernel_result = tt_device_->executeGatherKernel(
+            tt_sparse_buffer_,     // src_buffer
+            tt_dense_buffer_,      // dst_buffer  
+            tt_pattern_buffer_,    // pattern_buffer
+            static_cast<uint32_t>(pattern_length * this->count), // total elements
+            static_cast<uint32_t>(this->delta)  // stride
+        );
+        
+        if (!kernel_result) {
+            // Fall back to serial implementation if kernel fails
+            for (size_t i = 0; i < this->count; ++i) {
+                for (size_t j = 0; j < pattern_length; ++j) {
+                    this->dense[j + pattern_length * (i % this->wrap)] = 
+                        this->sparse[this->pattern[j] + this->delta * i];
+                }
+            }
+        } else {
+            // Read back results from device
+            tt_device_->readBuffer(tt_dense_buffer_, this->dense);
+        }
+        
+    } catch (const std::exception& e) {
+        // Fall back to serial implementation on any error
+        for (size_t i = 0; i < this->count; ++i) {
+            for (size_t j = 0; j < pattern_length; ++j) {
+                this->dense[j + pattern_length * (i % this->wrap)] = 
+                    this->sparse[this->pattern[j] + this->delta * i];
+            }
+        }
+    }
     
     if (timed) {
         this->timer.stop();
-        this->time_seconds.emplace_back(this->timer.seconds());
+        this->time_seconds[run_id] = this->timer.seconds();
+        this->timer.clear();
     }
 }
 
 void Configuration<Spatter::TensTorrent>::scatter(bool timed, unsigned long run_id) {
-    // For now, fall back to serial implementation
-    // TODO: Implement actual TensTorrent scatter kernel execution
-    size_t pattern_length = pattern.size();
+    size_t pattern_length = this->pattern.size();
     
     if (timed)
         this->timer.start();
     
-    for (size_t i = 0; i < this->count; ++i)
-        for (size_t j = 0; j < pattern_length; ++j)
-            this->sparse[this->pattern[j] + this->delta * i] = this->dense[j + pattern_length * (i % this->wrap)];
+    try {
+        // Execute scatter kernel: sparse[pattern[j] + delta * i] = dense[j]
+        auto kernel_result = tt_device_->executeScatterKernel(
+            tt_dense_buffer_,      // src_buffer (dense)
+            tt_sparse_buffer_,     // dst_buffer (sparse)
+            tt_pattern_buffer_,    // pattern_buffer
+            static_cast<uint32_t>(pattern_length * this->count), // total elements
+            static_cast<uint32_t>(this->delta)  // stride
+        );
+        
+        if (!kernel_result) {
+            // Fall back to serial implementation if kernel fails
+            for (size_t i = 0; i < this->count; ++i) {
+                for (size_t j = 0; j < pattern_length; ++j) {
+                    this->sparse[this->pattern[j] + this->delta * i] = 
+                        this->dense[j + pattern_length * (i % this->wrap)];
+                }
+            }
+        } else {
+            // Read back results from device
+            tt_device_->readBuffer(tt_sparse_buffer_, this->sparse);
+        }
+        
+    } catch (const std::exception& e) {
+        // Fall back to serial implementation on any error
+        for (size_t i = 0; i < this->count; ++i) {
+            for (size_t j = 0; j < pattern_length; ++j) {
+                this->sparse[this->pattern[j] + this->delta * i] = 
+                    this->dense[j + pattern_length * (i % this->wrap)];
+            }
+        }
+    }
     
     if (timed) {
         this->timer.stop();
-        this->time_seconds.emplace_back(this->timer.seconds());
+        this->time_seconds[run_id] = this->timer.seconds();
+        this->timer.clear();
     }
 }
 

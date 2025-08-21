@@ -41,7 +41,8 @@ endif()
 
 if (USE_TENSTORRENT)
   set(SPATTER_TESTS ${SPATTER_TESTS}
-    tenstorrent_basic_test)
+    tenstorrent_basic_test
+    noc_bandwidth_test)
 endif()
 
 foreach (APP ${SPATTER_TESTS})

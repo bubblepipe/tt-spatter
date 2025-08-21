@@ -365,8 +365,9 @@ int parse_input(const int argc, char **argv, ClArgs &cl) {
           [](unsigned char c) { return std::tolower(c); });
 
       if ((backend.compare("serial") != 0) &&
-          (backend.compare("openmp") != 0) && (backend.compare("cuda") != 0)) {
-        std::cerr << "Valid Backends are: serial, openmp, cuda" << std::endl;
+          (backend.compare("openmp") != 0) && (backend.compare("cuda") != 0) &&
+          (backend.compare("tenstorrent") != 0)) {
+        std::cerr << "Valid Backends are: serial, openmp, cuda, tenstorrent" << std::endl;
         return -1;
       }
       if (backend.compare("openmp") == 0) {
@@ -378,6 +379,12 @@ int parse_input(const int argc, char **argv, ClArgs &cl) {
       if (backend.compare("cuda") == 0) {
 #ifndef USE_CUDA
         std::cerr << "FAIL - CUDA Backend is not Enabled" << std::endl;
+        return -1;
+#endif
+      }
+      if (backend.compare("tenstorrent") == 0) {
+#ifndef USE_TENSTORRENT
+        std::cerr << "FAIL - TensTorrent Backend is not Enabled" << std::endl;
         return -1;
 #endif
       }
@@ -683,6 +690,16 @@ int parse_input(const int argc, char **argv, ClArgs &cl) {
           cl.dense_perthread, cl.dev_dense, cl.dense_size, delta, delta_gather,
           delta_scatter, seed, wrap, count, shared_mem, local_work_size, nruns,
           aggregate, atomic, verbosity);
+#endif
+#ifdef USE_TENSTORRENT
+    else if (backend.compare("tenstorrent") == 0)
+      c = std::make_unique<Spatter::Configuration<Spatter::TensTorrent>>(0,
+          config_name, kernel, pattern, pattern_gather, pattern_scatter,
+          cl.sparse, cl.dev_sparse, cl.sparse_size, cl.sparse_gather,
+          cl.dev_sparse_gather, cl.sparse_gather_size, cl.sparse_scatter,
+          cl.dev_sparse_scatter, cl.sparse_scatter_size, cl.dense,
+          cl.dense_perthread, cl.dev_dense, cl.dense_size, delta, delta_gather,
+          delta_scatter, seed, wrap, count, nruns, aggregate, verbosity);
 #endif
     else {
       std::cerr << "Invalid Backend " << backend << std::endl;
