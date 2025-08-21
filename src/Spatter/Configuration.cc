@@ -1114,6 +1114,11 @@ void Configuration<Spatter::TensTorrent>::scatter(bool timed, unsigned long run_
         this->timer.start();
     
     try {
+        // Check if buffers are properly initialized
+        if (!tt_device_ || !tt_dense_buffer_ || !tt_sparse_buffer_ || !tt_pattern_buffer_) {
+            throw std::runtime_error("TensTorrent buffers not properly initialized");
+        }
+        
         // Execute scatter kernel: sparse[pattern[j] + delta * i] = dense[j]
         auto kernel_result = tt_device_->executeScatterKernel(
             tt_dense_buffer_,      // src_buffer (dense)

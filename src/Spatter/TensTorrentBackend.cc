@@ -278,7 +278,7 @@ bool TensTorrentDevice::executeScatterKernel(
     uint32_t num_elements,
     uint32_t delta) {
     
-    if (!initialized_) {
+    if (!initialized_ || !src_buffer || !dst_buffer || !pattern_buffer) {
         return false;
     }
     
