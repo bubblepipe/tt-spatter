@@ -299,7 +299,7 @@ std::unique_ptr<Spatter::ConfigurationBase> JSONParser::operator[](
         dense_perthread, dev_dense, dense_size, delta, delta_gather,
         delta_scatter, (*data_json_ptr)[index]["seed"],
         (*data_json_ptr)[index]["wrap"], (*data_json_ptr)[index]["count"],
-        (*data_json_ptr)[index]["nruns"], aggregate_, verbosity_);
+        (*data_json_ptr)[index]["nruns"], aggregate_, verbosity_, 0);
 #endif
   else {
     std::cerr << "Invalid Backend " << backend_ << std::endl;

@@ -937,7 +937,7 @@ Configuration<Spatter::TensTorrent>::Configuration(const size_t id,
     const size_t delta_gather, const size_t delta_scatter,
     const long int seed, const size_t wrap, const size_t count,
     const unsigned long nruns, const bool aggregate,
-    const unsigned long verbosity)
+    const unsigned long verbosity, const int tt_cores)
     : ConfigurationBase(id, name, kernel, pattern, pattern_gather,
           pattern_scatter, sparse, dev_sparse, sparse_size, sparse_gather,
           dev_sparse_gather, sparse_gather_size, sparse_scatter,
@@ -946,11 +946,14 @@ Configuration<Spatter::TensTorrent>::Configuration(const size_t id,
           delta_scatter, seed, wrap, count, 0, 1024, 1, nruns, aggregate, false,
           false, false, verbosity) {
     // Initialize TensTorrent device
-    tt_device_ = std::make_unique<TensTorrentDevice>(0);
+    tt_device_ = std::make_unique<TensTorrentDevice>(0, tt_cores);
     if (!tt_device_->initialize()) {
         throw std::runtime_error("Failed to initialize TensTorrent device");
     }
     ConfigurationBase::setup();
+    
+    // Call TensTorrent-specific setup to create buffers
+    setup();
 }
 
 Configuration<Spatter::TensTorrent>::~Configuration() {
@@ -982,6 +985,28 @@ void Configuration<Spatter::TensTorrent>::setup() {
     auto round_to_tiles = [](size_t elements) -> size_t {
         return ((elements + elements_per_tile - 1) / elements_per_tile) * tile_size_bytes;
     };
+    
+    // Ensure data vectors are properly sized (like other backends)
+    std::cout << "DEBUG: Before resize - sparse.size()=" << sparse.size() << ", dense.size()=" << dense.size() << std::endl;
+    std::cout << "DEBUG: Required sizes - sparse_size=" << sparse_size << ", dense_size=" << dense_size << std::endl;
+    
+    if (sparse.size() < sparse_size) {
+        sparse.resize(sparse_size);
+        // Initialize with random data (similar to Input.hh)
+        for (size_t i = 0; i < sparse.size(); ++i) {
+            sparse[i] = static_cast<double>(rand()) / RAND_MAX;
+        }
+    }
+    
+    if (dense.size() < dense_size) {
+        dense.resize(dense_size);
+        // Initialize with random data (similar to Input.hh)
+        for (size_t i = 0; i < dense.size(); ++i) {
+            dense[i] = static_cast<double>(rand()) / RAND_MAX;
+        }
+    }
+    
+    std::cout << "DEBUG: After resize - sparse.size()=" << sparse.size() << ", dense.size()=" << dense.size() << std::endl;
     
     try {
         // Create buffers for pattern arrays (using size_t -> uint32_t conversion)
@@ -1057,18 +1082,31 @@ void Configuration<Spatter::TensTorrent>::setup() {
 }
 
 void Configuration<Spatter::TensTorrent>::gather(bool timed, unsigned long run_id) {
+    std::cout << "DEBUG: Configuration::gather method called!" << std::endl;
+    
     size_t pattern_length = this->pattern.size();
     
     if (timed)
         this->timer.start();
     
     try {
+        std::cout << "DEBUG: Configuration::gather - checking buffer initialization" << std::endl;
+        
+        // Check each buffer individually to identify which one is null
+        std::cout << "DEBUG: tt_device_ = " << (tt_device_ ? "valid" : "NULL") << std::endl;
+        std::cout << "DEBUG: tt_sparse_buffer_ = " << (tt_sparse_buffer_ ? "valid" : "NULL") << std::endl;
+        std::cout << "DEBUG: tt_dense_buffer_ = " << (tt_dense_buffer_ ? "valid" : "NULL") << std::endl;
+        std::cout << "DEBUG: tt_pattern_buffer_ = " << (tt_pattern_buffer_ ? "valid" : "NULL") << std::endl;
+        
         // Check if buffers are properly initialized
         if (!tt_device_ || !tt_sparse_buffer_ || !tt_dense_buffer_ || !tt_pattern_buffer_) {
+            std::cout << "DEBUG: Configuration::gather - buffer check failed!" << std::endl;
             throw std::runtime_error("TensTorrent buffers not properly initialized");
         }
+        std::cout << "DEBUG: Configuration::gather - buffers are initialized" << std::endl;
         
         // Execute gather kernel: dense[j] = sparse[pattern[j] + delta * i]
+        std::cout << "DEBUG: About to call executeGatherKernel!" << std::endl;
         auto kernel_result = tt_device_->executeGatherKernel(
             tt_sparse_buffer_,     // src_buffer
             tt_dense_buffer_,      // dst_buffer  

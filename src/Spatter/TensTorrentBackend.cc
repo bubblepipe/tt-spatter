@@ -16,12 +16,59 @@ using namespace tt::tt_metal;
 
 namespace Spatter {
 
-TensTorrentDevice::TensTorrentDevice(int device_id) 
-    : device_id_(device_id), initialized_(false), device_(nullptr), command_queue_(nullptr) {
+TensTorrentDevice::TensTorrentDevice(int device_id, int num_cores) 
+    : device_id_(device_id), initialized_(false), device_(nullptr), command_queue_(nullptr), num_cores_(num_cores) {
 }
 
 TensTorrentDevice::~TensTorrentDevice() {
     cleanup();
+}
+
+void TensTorrentDevice::discover_cores() {
+    // Get the actual compute grid size from the device
+    compute_grid_size_ = device_->compute_with_storage_grid_size();
+    
+    std::cout << "=== TensTorrent Core Configuration Debug ===" << std::endl;
+    std::cout << "Device compute grid size: " << compute_grid_size_.x << "x" << compute_grid_size_.y 
+              << " (" << (compute_grid_size_.x * compute_grid_size_.y) << " total cores)" << std::endl;
+    std::cout << "User requested cores (--tt-cores): " << num_cores_ << std::endl;
+    
+    // Calculate effective grid size based on user's request
+    uint32_t total_device_cores = compute_grid_size_.x * compute_grid_size_.y;
+    uint32_t effective_cores;
+    
+    if (num_cores_ <= 0) {
+        // Use all cores if user didn't specify or specified 0/negative
+        effective_cores = total_device_cores;
+        effective_grid_size_ = compute_grid_size_;
+        std::cout << "Using all available cores (default behavior)" << std::endl;
+    } else {
+        // Limit to user's requested number
+        effective_cores = std::min(static_cast<uint32_t>(num_cores_), total_device_cores);
+        
+        // Calculate effective grid dimensions
+        // For simplicity, we'll use a rectangular grid that fits the requested cores
+        // Start with same aspect ratio as device, then adjust
+        uint32_t effective_x = std::min(static_cast<uint32_t>(compute_grid_size_.x), effective_cores);
+        uint32_t effective_y = (effective_cores + effective_x - 1) / effective_x; // Ceiling division
+        effective_y = std::min(effective_y, static_cast<uint32_t>(compute_grid_size_.y));
+        
+        // Recalculate to ensure we don't exceed device limits
+        effective_cores = std::min(effective_x * effective_y, total_device_cores);
+        effective_grid_size_ = CoreCoord{effective_x, effective_y};
+        
+        std::cout << "Limiting to " << effective_cores << " cores as requested by user" << std::endl;
+    }
+    
+    std::cout << "Effective grid size: " << effective_grid_size_.x << "x" << effective_grid_size_.y 
+              << " (" << (effective_grid_size_.x * effective_grid_size_.y) << " cores)" << std::endl;
+    std::cout << "=============================================" << std::endl;
+    
+    // For now, we'll use the split_work_to_cores approach directly in the kernel execution
+    // The active_cores_ vector will be populated by split_work_to_cores when we execute kernels
+    // This allows for optimal work distribution based on the actual workload size
+    
+    std::cout << "Multi-core discovery completed. Cores will be allocated dynamically based on workload." << std::endl;
 }
 
 bool TensTorrentDevice::initialize() {
@@ -35,6 +82,9 @@ bool TensTorrentDevice::initialize() {
         
         // Get command queue for this device
         command_queue_ = &device_->command_queue();
+        
+        // Query available compute cores
+        discover_cores();
         
         // Compile kernels
         compile_kernels();
@@ -227,8 +277,10 @@ void TensTorrentDevice::execute_gather_kernel(
         l1_buffer->address()
     };
     
-    CoreCoord core = get_default_core();
-    SetRuntimeArgs(gather_program_, gather_kernel_handle_, core, runtime_args);
+    // Use the first active core for legacy gather function
+    if (!active_cores_.empty()) {
+        SetRuntimeArgs(gather_program_, gather_reader_kernel_handle_, active_cores_[0], runtime_args);
+    }
     
     // Execute the program
     EnqueueProgram(*command_queue_, gather_program_, false);
@@ -242,24 +294,87 @@ bool TensTorrentDevice::executeGatherKernel(
     uint32_t num_elements,
     uint32_t delta) {
     
+    std::cout << "DEBUG: executeGatherKernel called!" << std::endl;
+    
     if (!initialized_) {
+        std::cout << "DEBUG: executeGatherKernel - device not initialized!" << std::endl;
         return false;
     }
     
     try {
-        // Set up runtime arguments for gather kernel
-        std::vector<uint32_t> runtime_args = {
-            src_buffer->address(),      // arg0: src_buffer_addr
-            dst_buffer->address(),      // arg1: dst_buffer_addr  
-            pattern_buffer->address(),  // arg2: pattern_buffer_addr
-            num_elements,               // arg3: num_elements
-            delta                       // arg4: delta stride
-        };
+        std::cout << "\n=== Gather Kernel Execution Debug ===" << std::endl;
+        std::cout << "Total elements to process: " << num_elements << std::endl;
+        std::cout << "Delta (stride): " << delta << std::endl;
+        std::cout << "Effective grid size for work distribution: " << effective_grid_size_.x << "x" << effective_grid_size_.y << std::endl;
         
-        // Set runtime arguments
-        SetRuntimeArgs(gather_program_, gather_kernel_handle_, get_default_core(), runtime_args);
+        // Use split_work_to_cores utility to distribute work properly using effective grid size
+        auto [num_cores, all_cores, core_group_1, core_group_2, work_per_core1, work_per_core2] = 
+            split_work_to_cores(effective_grid_size_, num_elements);
+            
+        std::cout << "split_work_to_cores result:" << std::endl;
+        std::cout << "  - Cores that will be used: " << num_cores << std::endl;
+        std::cout << "  - Core group 1 work per core: " << work_per_core1 << std::endl;
+        std::cout << "  - Core group 2 work per core: " << work_per_core2 << std::endl;
         
-        // Execute the program
+        // Set runtime arguments for each core following TT-Metal multi-core pattern
+        uint32_t work_offset = 0;
+        uint32_t cores_configured = 0;
+        auto work_groups = {std::make_pair(core_group_1, work_per_core1), 
+                           std::make_pair(core_group_2, work_per_core2)};
+        
+        std::cout << "Configuring runtime arguments for cores:" << std::endl;
+        
+        // Iterate through each work group and assign work to cores
+        for (const auto& [ranges, work_per_core] : work_groups) {
+            if (work_per_core == 0) {
+                std::cout << "  Skipping work group with 0 work per core" << std::endl;
+                continue;
+            }
+            
+            for (const auto& range : ranges.ranges()) {
+                for (const auto& core : range) {
+                    cores_configured++;
+                    std::cout << "  Core (" << core.x << "," << core.y << "): offset=" << work_offset 
+                              << ", work=" << work_per_core << std::endl;
+                    
+                    // Set runtime arguments for 3-kernel architecture
+                    
+                    // Reader kernel arguments
+                    std::vector<uint32_t> reader_runtime_args = {
+                        src_buffer->address(),      // arg0: src_buffer_addr
+                        pattern_buffer->address(),  // arg1: pattern_buffer_addr  
+                        work_offset,                // arg2: work_offset for this core
+                        work_per_core,              // arg3: work_per_core for this core
+                        delta,                      // arg4: delta stride
+                        num_elements                // arg5: sparse_size for bounds checking
+                    };
+                    SetRuntimeArgs(gather_program_, gather_reader_kernel_handle_, core, reader_runtime_args);
+                    
+                    // Compute kernel arguments
+                    uint32_t num_tiles = (work_per_core + (32*32-1)) / (32*32); // Convert elements to tiles
+                    std::vector<uint32_t> compute_runtime_args = {
+                        num_tiles,                  // arg0: num_tiles to process
+                        delta,                      // arg1: delta stride
+                        32 * 32                     // arg2: elements_per_tile
+                    };
+                    SetRuntimeArgs(gather_program_, gather_compute_kernel_handle_, core, compute_runtime_args);
+                    
+                    // Writer kernel arguments  
+                    std::vector<uint32_t> writer_runtime_args = {
+                        dst_buffer->address(),      // arg0: dst_buffer_addr
+                        num_tiles,                  // arg1: num_tiles to write
+                        work_offset                 // arg2: work_offset for this core
+                    };
+                    SetRuntimeArgs(gather_program_, gather_writer_kernel_handle_, core, writer_runtime_args);
+                    work_offset += work_per_core;
+                }
+            }
+        }
+        
+        std::cout << "Total cores configured: " << cores_configured << std::endl;
+        std::cout << "Total work distributed: " << work_offset << " elements" << std::endl;
+        
+        // Execute the program on all cores with a single EnqueueProgram call
         EnqueueProgram(*command_queue_, gather_program_, false);
         Finish(*command_queue_);
         
@@ -278,24 +393,69 @@ bool TensTorrentDevice::executeScatterKernel(
     uint32_t num_elements,
     uint32_t delta) {
     
+    std::cout << "DEBUG: executeScatterKernel called!" << std::endl;
+    
     if (!initialized_ || !src_buffer || !dst_buffer || !pattern_buffer) {
+        std::cout << "DEBUG: executeScatterKernel - initialization check failed!" << std::endl;
         return false;
     }
     
     try {
-        // Set up runtime arguments for scatter kernel
-        std::vector<uint32_t> runtime_args = {
-            src_buffer->address(),      // arg0: src_buffer_addr (dense)
-            dst_buffer->address(),      // arg1: dst_buffer_addr (sparse)
-            pattern_buffer->address(),  // arg2: pattern_buffer_addr
-            num_elements,               // arg3: num_elements
-            delta                       // arg4: delta stride
-        };
+        std::cout << "\n=== Scatter Kernel Execution Debug ===" << std::endl;
+        std::cout << "Total elements to process: " << num_elements << std::endl;
+        std::cout << "Delta (stride): " << delta << std::endl;
+        std::cout << "Effective grid size for work distribution: " << effective_grid_size_.x << "x" << effective_grid_size_.y << std::endl;
         
-        // Set runtime arguments for scatter program
-        SetRuntimeArgs(scatter_program_, scatter_kernel_handle_, get_default_core(), runtime_args);
+        // Use split_work_to_cores utility to distribute work properly using effective grid size
+        auto [num_cores, all_cores, core_group_1, core_group_2, work_per_core1, work_per_core2] = 
+            split_work_to_cores(effective_grid_size_, num_elements);
+            
+        std::cout << "split_work_to_cores result:" << std::endl;
+        std::cout << "  - Cores that will be used: " << num_cores << std::endl;
+        std::cout << "  - Core group 1 work per core: " << work_per_core1 << std::endl;
+        std::cout << "  - Core group 2 work per core: " << work_per_core2 << std::endl;
         
-        // Execute the program
+        // Set runtime arguments for each core following TT-Metal multi-core pattern
+        uint32_t work_offset = 0;
+        uint32_t cores_configured = 0;
+        auto work_groups = {std::make_pair(core_group_1, work_per_core1), 
+                           std::make_pair(core_group_2, work_per_core2)};
+        
+        std::cout << "Configuring runtime arguments for cores:" << std::endl;
+        
+        // Iterate through each work group and assign work to cores
+        for (const auto& [ranges, work_per_core] : work_groups) {
+            if (work_per_core == 0) {
+                std::cout << "  Skipping work group with 0 work per core" << std::endl;
+                continue;
+            }
+            
+            for (const auto& range : ranges.ranges()) {
+                for (const auto& core : range) {
+                    cores_configured++;
+                    std::cout << "  Core (" << core.x << "," << core.y << "): offset=" << work_offset 
+                              << ", work=" << work_per_core << std::endl;
+                    
+                    // Set runtime arguments for this core
+                    std::vector<uint32_t> core_runtime_args = {
+                        src_buffer->address(),      // arg0: src_buffer_addr (dense)
+                        dst_buffer->address(),      // arg1: dst_buffer_addr (sparse)
+                        pattern_buffer->address(),  // arg2: pattern_buffer_addr
+                        work_offset,                // arg3: work_offset for this core
+                        work_per_core,              // arg4: work_per_core for this core
+                        delta                       // arg5: delta stride
+                    };
+                    
+                    SetRuntimeArgs(scatter_program_, scatter_reader_kernel_handle_, core, core_runtime_args);
+                    work_offset += work_per_core;
+                }
+            }
+        }
+        
+        std::cout << "Total cores configured: " << cores_configured << std::endl;
+        std::cout << "Total work distributed: " << work_offset << " elements" << std::endl;
+        
+        // Execute the program on all cores with a single EnqueueProgram call
         EnqueueProgram(*command_queue_, scatter_program_, false);
         Finish(*command_queue_);
         
@@ -342,8 +502,10 @@ void TensTorrentDevice::execute_noc_bandwidth_kernel(
         neighbor_y                                     // Neighbor NOC Y coordinate
     };
     
-    auto core = get_default_core();
-    SetRuntimeArgs(noc_bandwidth_program_, noc_bandwidth_kernel_handle_, core, runtime_args);
+    // Use the first active core for NOC bandwidth test
+    if (!active_cores_.empty()) {
+        SetRuntimeArgs(noc_bandwidth_program_, noc_bandwidth_kernel_handle_, active_cores_[0], runtime_args);
+    }
     
     // Execute the NOC bandwidth kernel
     EnqueueProgram(*command_queue_, noc_bandwidth_program_, false);
@@ -364,55 +526,115 @@ size_t TensTorrentDevice::get_max_memory() const {
 }
 
 void TensTorrentDevice::compile_kernels() {
-    // Create gather program
+    // Get the compute core range from the device using effective grid size
+    // This creates a CoreRangeSet covering the effective compute cores
+    CoreRangeSet all_cores = CoreRangeSet(CoreRange(CoreCoord{0, 0}, CoreCoord{effective_grid_size_.x - 1, effective_grid_size_.y - 1}));
+    
+    std::cout << "=== 3-Kernel Architecture Compilation Debug ===" << std::endl;
+    std::cout << "Compiling kernels on effective grid: " << effective_grid_size_.x << "x" << effective_grid_size_.y << " cores" << std::endl;
+    std::cout << "Kernel compilation range: (0,0) to (" << (effective_grid_size_.x - 1) << "," << (effective_grid_size_.y - 1) << ")" << std::endl;
+    
+    // Constants for circular buffers
+    constexpr uint32_t single_tile_size = 32 * 32 * 2; // BFloat16 tile size = 2048 bytes
+    constexpr uint32_t num_tiles_per_cb = 2; // Double buffering
+    const auto cb_data_format = tt::DataFormat::Float16_b;
+    
+    // ===============================
+    // GATHER PROGRAM SETUP
+    // ===============================
     gather_program_ = CreateProgram();
     
-    CoreCoord core = get_default_core();
-    
-    // Create gather kernel
-    std::vector<uint32_t> compile_args;
-    // Add any compile-time arguments here
-    
-    gather_kernel_handle_ = CreateKernel(
+    // Create circular buffers for gather operation (following matmul pattern)
+    // CB_c_0: Sparse data (from reader to compute)
+    tt::tt_metal::CreateCircularBuffer(
         gather_program_,
-        "/storage/tt/tt-spatter/src/Spatter/kernels/gather_kernel.cpp",
-        core,
+        all_cores,
+        CircularBufferConfig(num_tiles_per_cb * single_tile_size, {{tt::CBIndex::c_0, cb_data_format}})
+            .set_page_size(tt::CBIndex::c_0, single_tile_size)
+    );
+    
+    // CB_c_1: Pattern data (from reader to compute)
+    tt::tt_metal::CreateCircularBuffer(
+        gather_program_,
+        all_cores,
+        CircularBufferConfig(num_tiles_per_cb * single_tile_size, {{tt::CBIndex::c_1, cb_data_format}})
+            .set_page_size(tt::CBIndex::c_1, single_tile_size)
+    );
+    
+    // CB_c_16: Output data (from compute to writer)
+    tt::tt_metal::CreateCircularBuffer(
+        gather_program_,
+        all_cores,
+        CircularBufferConfig(num_tiles_per_cb * single_tile_size, {{tt::CBIndex::c_16, cb_data_format}})
+            .set_page_size(tt::CBIndex::c_16, single_tile_size)
+    );
+    
+    // Create gather kernels (3-kernel architecture)
+    std::vector<uint32_t> reader_compile_args;
+    // TODO: Add TensorAccessor compile args when buffers are known
+    
+    // Reader kernel (RISCV_1, NOC_1)
+    gather_reader_kernel_handle_ = CreateKernel(
+        gather_program_,
+        "/storage/tt/tt-spatter/src/Spatter/kernels/dataflow/reader_gather.cpp",
+        all_cores,
         DataMovementConfig{
-            .processor = DataMovementProcessor::RISCV_0,
-            .noc = NOC::RISCV_0_default,
-            .compile_args = compile_args
+            .processor = DataMovementProcessor::RISCV_1,
+            .noc = NOC::RISCV_1_default,
+            .compile_args = reader_compile_args
         }
     );
     
-    // Create scatter program
+    // Compute kernel (Math cores)
+    gather_compute_kernel_handle_ = CreateKernel(
+        gather_program_,
+        "/storage/tt/tt-spatter/src/Spatter/kernels/compute/gather_compute.cpp",
+        all_cores,
+        ComputeConfig{
+            .math_fidelity = MathFidelity::HiFi4,
+            .compile_args = {}
+        }
+    );
+    
+    // Writer kernel (RISCV_0, NOC_0)
+    std::vector<uint32_t> writer_compile_args;
+    gather_writer_kernel_handle_ = CreateKernel(
+        gather_program_,
+        "/storage/tt/tt-spatter/src/Spatter/kernels/dataflow/writer_gather.cpp",
+        all_cores,
+        DataMovementConfig{
+            .processor = DataMovementProcessor::RISCV_0,
+            .noc = NOC::RISCV_0_default,
+            .compile_args = writer_compile_args
+        }
+    );
+    
+    // ===============================
+    // SCATTER PROGRAM SETUP (TODO)
+    // ===============================
     scatter_program_ = CreateProgram();
+    // TODO: Implement scatter 3-kernel architecture
     
-    scatter_kernel_handle_ = CreateKernel(
-        scatter_program_,
-        "/storage/tt/tt-spatter/src/Spatter/kernels/scatter_kernel.cpp",
-        core,
-        DataMovementConfig{
-            .processor = DataMovementProcessor::RISCV_0,
-            .noc = NOC::RISCV_0_default,
-            .compile_args = compile_args
-        }
-    );
-    
-    // Create NOC bandwidth program  
+    // ===============================
+    // NOC BANDWIDTH TEST PROGRAM
+    // ===============================
     noc_bandwidth_program_ = CreateProgram();
     
+    // For NOC bandwidth test, we only need one core
+    CoreCoord single_core = CoreCoord{0, 0};
+    std::vector<uint32_t> noc_compile_args;
     noc_bandwidth_kernel_handle_ = CreateKernel(
         noc_bandwidth_program_,
         "/storage/tt/tt-spatter/src/Spatter/kernels/noc_bandwidth_kernel.cpp",
-        core,
+        single_core,
         DataMovementConfig{
             .processor = DataMovementProcessor::RISCV_0,
             .noc = NOC::RISCV_0_default,
-            .compile_args = compile_args
+            .compile_args = noc_compile_args
         }
     );
     
-    // TODO: Compile gather-scatter and multi kernels
+    std::cout << "3-Kernel architecture compilation completed on all compute cores" << std::endl;
 }
 
 size_t TensTorrentDevice::align_to_tile_size(size_t size) const {
@@ -450,10 +672,6 @@ size_t calculate_buffer_size(size_t num_elements) {
     
     // Round up to tile boundary
     return ((total_size + tile_size - 1) / tile_size) * tile_size;
-}
-
-CoreCoord get_default_core() {
-    return {0, 0};  // Use core (0,0) as default
 }
 
 } // namespace Spatter

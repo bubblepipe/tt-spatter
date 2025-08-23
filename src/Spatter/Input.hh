@@ -60,6 +60,7 @@ const option longargs[] = {{"aggregate", no_argument, nullptr, 'a'},
     {"delta-gather", required_argument, nullptr, 'x'},
     {"delta-scatter", required_argument, nullptr, 'y'},
     {"local-work-size", required_argument, nullptr, 'z'},
+    {"tt-cores", required_argument, nullptr, 0},
     {nullptr, no_argument, nullptr, 0}};
 
 struct ClArgs {
@@ -88,6 +89,7 @@ struct ClArgs {
   bool atomic_fence;
   bool compress;
   bool dense_buffers;
+  int tt_cores;
   unsigned long verbosity;
 
   void report_header() {
@@ -152,6 +154,9 @@ void help(char *progname) {
             << std::setw(40)
             << "Enable multiple dense buffers for OpenMP kernels "
             << "(default off)" << std::left << "\n";
+  std::cout << std::left << std::setw(10) << "   (--tt-cores) "
+            << std::setw(40)
+            << "Number of TensTorrent cores to use (0=all, default 0)" << std::left << "\n";
   std::cout << std::left << std::setw(10) << "-e (--boundary)" << std::setw(40)
             << " Set Boundary (limits max value of pattern using modulo)"
             << std::left << "\n";
@@ -215,6 +220,7 @@ void usage(char *progname) {
                "[-b backend] [-c compress] "
                "[-d delta] [--dense-buffers] [-e "
                "boundary] [-f input file] [-g inner gather pattern] "
+               "[--tt-cores cores] "
                "[-h "
                "help] [-j pattern-size] [-k kernel] [-l count] [-m "
                "shared-memory] [-n name] [-o op]"
@@ -289,6 +295,7 @@ int parse_input(const int argc, char **argv, ClArgs &cl) {
   cl.atomic_fence = false;
   cl.compress = false;
   cl.dense_buffers = false;
+  cl.tt_cores = 0;  // 0 means use all available cores
   cl.verbosity = 1;
 
   // In flag alphabetical order
@@ -298,6 +305,7 @@ int parse_input(const int argc, char **argv, ClArgs &cl) {
   std::string backend = cl.backend;
   bool compress = cl.compress;
   bool dense_buffers = cl.dense_buffers;
+  int tt_cores = cl.tt_cores;
   size_t delta = 8;
   size_t boundary = 0;
 
@@ -352,6 +360,11 @@ int parse_input(const int argc, char **argv, ClArgs &cl) {
       }
       if (strcmp(longargs[option_index].name, "dense-buffers") == 0) {
         dense_buffers = true;
+      }
+      if (strcmp(longargs[option_index].name, "tt-cores") == 0) {
+        if (read_int_arg(optarg, tt_cores, 0, 
+            "Parsing Error: Invalid number of TensTorrent cores") == -1)
+          return -1;
       }
       break;
 
@@ -551,6 +564,7 @@ int parse_input(const int argc, char **argv, ClArgs &cl) {
   cl.aggregate = aggregate;
   cl.compress = compress;
   cl.dense_buffers = dense_buffers;
+  cl.tt_cores = tt_cores;
   cl.verbosity = verbosity;
 
 #ifdef USE_OPENMP
@@ -699,7 +713,7 @@ int parse_input(const int argc, char **argv, ClArgs &cl) {
           cl.dev_sparse_gather, cl.sparse_gather_size, cl.sparse_scatter,
           cl.dev_sparse_scatter, cl.sparse_scatter_size, cl.dense,
           cl.dense_perthread, cl.dev_dense, cl.dense_size, delta, delta_gather,
-          delta_scatter, seed, wrap, count, nruns, aggregate, verbosity);
+          delta_scatter, seed, wrap, count, nruns, aggregate, verbosity, cl.tt_cores);
 #endif
     else {
       std::cerr << "Invalid Backend " << backend << std::endl;

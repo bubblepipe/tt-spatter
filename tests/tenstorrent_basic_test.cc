@@ -78,8 +78,9 @@ int main() {
         size_t buffer_size = Spatter::calculate_buffer_size(1000);
         std::cout << "Calculated buffer size for 1000 elements: " << buffer_size << " bytes" << std::endl;
         
-        auto core = Spatter::get_default_core();
-        std::cout << "Default core coordinates: (" << core.x << ", " << core.y << ")" << std::endl;
+        // Test core coordinates (using first compute core)
+        CoreCoord core = {1, 1};
+        std::cout << "Test core coordinates: (" << core.x << ", " << core.y << ")" << std::endl;
         
         std::cout << "All TensTorrent backend tests passed!" << std::endl;
         return 0;

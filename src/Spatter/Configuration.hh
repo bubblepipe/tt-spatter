@@ -263,7 +263,7 @@ public:
       const size_t delta_gather, const size_t delta_scatter,
       const long int seed, const size_t wrap, const size_t count,
       const unsigned long nruns, const bool aggregate,
-      const unsigned long verbosity);
+      const unsigned long verbosity, const int tt_cores);
 
   ~Configuration();
 

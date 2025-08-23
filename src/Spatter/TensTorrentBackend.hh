@@ -13,6 +13,7 @@
 #include <map>
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/device.hpp>
+#include <tt-metalium/work_split.hpp>
 
 // Forward declaration for aligned_vector - definition is in Configuration.hh
 template <typename T, size_t Alignment>
@@ -25,13 +26,17 @@ namespace Spatter {
 
 class TensTorrentDevice {
 public:
-    TensTorrentDevice(int device_id = 0);
+    TensTorrentDevice(int device_id = 0, int num_cores = 0);
     ~TensTorrentDevice();
     
     // Device management
     bool initialize();
     void cleanup();
     bool is_initialized() const { return initialized_; }
+    
+    // Core management
+    void discover_cores();
+    std::vector<CoreCoord> get_active_cores() const { return active_cores_; }
     
     // Memory management
     std::shared_ptr<tt::tt_metal::Buffer> allocate_buffer(size_t size_bytes, 
@@ -99,15 +104,29 @@ public:
 private:
     int device_id_;
     bool initialized_;
+    int num_cores_;
     tt::tt_metal::IDevice* device_;
     tt::tt_metal::CommandQueue* command_queue_;
+    std::vector<CoreCoord> active_cores_;
+    CoreCoord compute_grid_size_;
+    CoreCoord effective_grid_size_;  // Limited by user's --tt-cores parameter
     
-    // Kernel programs
+    // Kernel programs - 3-kernel architecture
     tt::tt_metal::Program gather_program_;
     tt::tt_metal::Program scatter_program_;
     tt::tt_metal::Program noc_bandwidth_program_;
-    tt::tt_metal::KernelHandle gather_kernel_handle_;
-    tt::tt_metal::KernelHandle scatter_kernel_handle_;
+    
+    // Gather kernel handles (reader/compute/writer)
+    tt::tt_metal::KernelHandle gather_reader_kernel_handle_;
+    tt::tt_metal::KernelHandle gather_compute_kernel_handle_;
+    tt::tt_metal::KernelHandle gather_writer_kernel_handle_;
+    
+    // Scatter kernel handles (reader/compute/writer)
+    tt::tt_metal::KernelHandle scatter_reader_kernel_handle_;
+    tt::tt_metal::KernelHandle scatter_compute_kernel_handle_;
+    tt::tt_metal::KernelHandle scatter_writer_kernel_handle_;
+    
+    // NOC bandwidth test kernel
     tt::tt_metal::KernelHandle noc_bandwidth_kernel_handle_;
     
     // Buffer size tracking for reads
@@ -129,7 +148,6 @@ private:
 // Helper functions for TensTorrent backend
 void check_tt_error(const std::string& operation);
 size_t calculate_buffer_size(size_t num_elements);
-tt::tt_metal::CoreCoord get_default_core();
 
 } // namespace Spatter
 
