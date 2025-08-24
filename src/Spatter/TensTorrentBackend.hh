@@ -14,6 +14,7 @@
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/device.hpp>
 #include <tt-metalium/work_split.hpp>
+#include <tt-metalium/bfloat16.hpp>
 
 // Forward declaration for aligned_vector - definition is in Configuration.hh
 template <typename T, size_t Alignment>
@@ -41,8 +42,7 @@ public:
     // Memory management
     std::shared_ptr<tt::tt_metal::Buffer> allocate_buffer(size_t size_bytes, 
                                                           tt::tt_metal::BufferType type = tt::tt_metal::BufferType::DRAM);
-    std::shared_ptr<tt::tt_metal::Buffer> createBuffer(size_t size_bytes, 
-                                                       tt::tt_metal::BufferType type = tt::tt_metal::BufferType::DRAM);
+    // Method removed - use allocate_buffer directly
     
     // Data transfer
     void write_buffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
@@ -50,12 +50,9 @@ public:
     void read_buffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
                      std::vector<double>& data, bool blocking = true);
                      
-    void readBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
-                    std::vector<double>& data, bool blocking = true);
+    // Only keep essential aligned_vector methods needed by Configuration
     void readBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
                     aligned_vector<double>& data, bool blocking = true);
-    void writeBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
-                     const std::vector<double>& data, bool blocking = true);
     void writeBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
                      const std::vector<uint32_t>& data, bool blocking = true);
     void writeBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
@@ -63,13 +60,7 @@ public:
     void writeBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
                      const aligned_vector<size_t>& data, bool blocking = true);
     
-    // Kernel execution
-    void execute_gather_kernel(
-        std::shared_ptr<tt::tt_metal::Buffer> src_buffer,
-        std::shared_ptr<tt::tt_metal::Buffer> dst_buffer,
-        std::shared_ptr<tt::tt_metal::Buffer> pattern_buffer,
-        size_t num_elements);
-        
+    // Kernel execution - only keep working methods
     bool executeGatherKernel(
         std::shared_ptr<tt::tt_metal::Buffer> src_buffer,
         std::shared_ptr<tt::tt_metal::Buffer> dst_buffer,
@@ -77,25 +68,12 @@ public:
         uint32_t num_elements,
         uint32_t delta);
         
-    void execute_scatter_kernel(
-        std::shared_ptr<tt::tt_metal::Buffer> src_buffer,
-        std::shared_ptr<tt::tt_metal::Buffer> dst_buffer,
-        std::shared_ptr<tt::tt_metal::Buffer> pattern_buffer,
-        size_t num_elements);
-        
     bool executeScatterKernel(
         std::shared_ptr<tt::tt_metal::Buffer> src_buffer,
         std::shared_ptr<tt::tt_metal::Buffer> dst_buffer,
         std::shared_ptr<tt::tt_metal::Buffer> pattern_buffer,
         uint32_t num_elements,
         uint32_t delta);
-        
-    void execute_noc_bandwidth_kernel(
-        std::shared_ptr<tt::tt_metal::Buffer> src_buffer,
-        std::shared_ptr<tt::tt_metal::Buffer> dst_buffer,
-        size_t num_tiles,
-        uint32_t neighbor_x,
-        uint32_t neighbor_y);
     
     // Device information
     std::string get_device_info() const;
@@ -111,32 +89,22 @@ private:
     CoreCoord compute_grid_size_;
     CoreCoord effective_grid_size_;  // Limited by user's --tt-cores parameter
     
-    // Kernel programs - 3-kernel architecture
-    tt::tt_metal::Program gather_program_;
-    tt::tt_metal::Program scatter_program_;
-    tt::tt_metal::Program noc_bandwidth_program_;
+    // Single-kernel programs (created on-demand like loopback example)
     
-    // Gather kernel handles (reader/compute/writer)
-    tt::tt_metal::KernelHandle gather_reader_kernel_handle_;
-    tt::tt_metal::KernelHandle gather_compute_kernel_handle_;
-    tt::tt_metal::KernelHandle gather_writer_kernel_handle_;
+    // Single-kernel handles (created on-demand like loopback example)
     
-    // Scatter kernel handles (reader/compute/writer)
-    tt::tt_metal::KernelHandle scatter_reader_kernel_handle_;
-    tt::tt_metal::KernelHandle scatter_compute_kernel_handle_;
-    tt::tt_metal::KernelHandle scatter_writer_kernel_handle_;
+    // Removed legacy kernel handles
     
-    // NOC bandwidth test kernel
-    tt::tt_metal::KernelHandle noc_bandwidth_kernel_handle_;
+    // Single-kernel approach - no lazy initialization needed
     
     // Buffer size tracking for reads
     std::map<std::shared_ptr<tt::tt_metal::Buffer>, size_t> buffer_sizes_;
     
     // Helper methods
     void compile_kernels();
+    // Single-kernel approach - no complex initialization needed
+        
     size_t align_to_tile_size(size_t size) const;
-    std::vector<float> convert_double_to_bfloat16(const std::vector<double>& input) const;
-    std::vector<double> convert_bfloat16_to_double(const std::vector<float>& input) const;
     
     // Constants
     static constexpr size_t TILE_WIDTH = 32;

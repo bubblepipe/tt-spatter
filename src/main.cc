@@ -72,7 +72,7 @@ int main(int argc, char **argv) {
   MPI_Comm_size(MPI_COMM_WORLD, &size);
 #endif
 
-  const unsigned long warmup_runs = 10;
+  const unsigned long warmup_runs = 0;
   bool timed = 0;
 
   Spatter::ClArgs cl;

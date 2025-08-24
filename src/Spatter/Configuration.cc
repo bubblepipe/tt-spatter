@@ -1014,7 +1014,7 @@ void Configuration<Spatter::TensTorrent>::setup() {
             size_t pattern_size_bytes = round_to_tiles(pattern.size() * sizeof(uint32_t));
             std::cout << "DEBUG: Creating pattern buffer of size " << pattern_size_bytes 
                       << " for " << pattern.size() << " elements" << std::endl;
-            tt_pattern_buffer_ = tt_device_->createBuffer(pattern_size_bytes);
+            tt_pattern_buffer_ = tt_device_->allocate_buffer(pattern_size_bytes);
             if (!tt_pattern_buffer_) {
                 throw std::runtime_error("Failed to create pattern buffer");
             }
@@ -1022,12 +1022,12 @@ void Configuration<Spatter::TensTorrent>::setup() {
         
         if (!pattern_gather.empty()) {
             size_t pattern_gather_size_bytes = round_to_tiles(pattern_gather.size() * sizeof(uint32_t));
-            tt_pattern_gather_buffer_ = tt_device_->createBuffer(pattern_gather_size_bytes);
+            tt_pattern_gather_buffer_ = tt_device_->allocate_buffer(pattern_gather_size_bytes);
         }
         
         if (!pattern_scatter.empty()) {
             size_t pattern_scatter_size_bytes = round_to_tiles(pattern_scatter.size() * sizeof(uint32_t));
-            tt_pattern_scatter_buffer_ = tt_device_->createBuffer(pattern_scatter_size_bytes);
+            tt_pattern_scatter_buffer_ = tt_device_->allocate_buffer(pattern_scatter_size_bytes);
         }
         
         // Create buffers for data arrays (double -> BFloat16 conversion)
@@ -1035,7 +1035,7 @@ void Configuration<Spatter::TensTorrent>::setup() {
             size_t sparse_size_bytes = round_to_tiles(sparse.size() * 2); // BFloat16 = 2 bytes
             std::cout << "DEBUG: Creating sparse buffer of size " << sparse_size_bytes 
                       << " for " << sparse.size() << " elements" << std::endl;
-            tt_sparse_buffer_ = tt_device_->createBuffer(sparse_size_bytes);
+            tt_sparse_buffer_ = tt_device_->allocate_buffer(sparse_size_bytes);
             if (!tt_sparse_buffer_) {
                 throw std::runtime_error("Failed to create sparse buffer");
             }
@@ -1045,7 +1045,7 @@ void Configuration<Spatter::TensTorrent>::setup() {
             size_t dense_size_bytes = round_to_tiles(dense.size() * 2); // BFloat16 = 2 bytes  
             std::cout << "DEBUG: Creating dense buffer of size " << dense_size_bytes 
                       << " for " << dense.size() << " elements" << std::endl;
-            tt_dense_buffer_ = tt_device_->createBuffer(dense_size_bytes);
+            tt_dense_buffer_ = tt_device_->allocate_buffer(dense_size_bytes);
             if (!tt_dense_buffer_) {
                 throw std::runtime_error("Failed to create dense buffer");
             }

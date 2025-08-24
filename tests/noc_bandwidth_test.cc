@@ -82,8 +82,9 @@ private:
         // Compile and run NOC bandwidth kernel
         auto start_time = std::chrono::high_resolution_clock::now();
         
-        // Execute NOC bandwidth kernel
-        device_.execute_noc_bandwidth_kernel(src_buffer, dest_buffer, num_tiles, dest_x, dest_y);
+        // Execute NOC bandwidth kernel - DISABLED (removed during single-kernel refactor)
+        // device_.execute_noc_bandwidth_kernel(src_buffer, dest_buffer, num_tiles, dest_x, dest_y);
+        std::cout << "NOC bandwidth test disabled - functionality removed during refactor" << std::endl;
 
         auto end_time = std::chrono::high_resolution_clock::now();
         

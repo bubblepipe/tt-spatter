@@ -11,6 +11,7 @@
 #include "AlignedAllocator.hh"
 #include <algorithm>
 #include <tt-metalium/bfloat16.hpp>
+#include <tt-metalium/tensor_accessor_args.hpp>
 
 using namespace tt::tt_metal;
 
@@ -129,11 +130,7 @@ std::shared_ptr<tt::tt_metal::Buffer> TensTorrentDevice::allocate_buffer(size_t 
     return CreateBuffer(config);
 }
 
-std::shared_ptr<tt::tt_metal::Buffer> TensTorrentDevice::createBuffer(size_t size_bytes, 
-                                                                      tt::tt_metal::BufferType type) {
-    // Wrapper method for consistency with Configuration naming
-    return allocate_buffer(size_bytes, type);
-}
+// Method removed - use allocate_buffer directly
 
 void TensTorrentDevice::write_buffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
                                      const std::vector<double>& data, bool blocking) {
@@ -192,17 +189,9 @@ void TensTorrentDevice::read_buffer(std::shared_ptr<tt::tt_metal::Buffer> buffer
     }
 }
 
-void TensTorrentDevice::readBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
-                                   std::vector<double>& data, bool blocking) {
-    // Wrapper method for consistency with Configuration naming
-    read_buffer(buffer, data, blocking);
-}
+// Method removed - use read_buffer directly
 
-void TensTorrentDevice::writeBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
-                                    const std::vector<double>& data, bool blocking) {
-    // Wrapper method for consistency with Configuration naming
-    write_buffer(buffer, data, blocking);
-}
+// Method removed - use write_buffer directly
 
 void TensTorrentDevice::writeBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
                                     const std::vector<uint32_t>& data, bool blocking) {
@@ -255,37 +244,7 @@ void TensTorrentDevice::readBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer,
     }
 }
 
-void TensTorrentDevice::execute_gather_kernel(
-    std::shared_ptr<tt::tt_metal::Buffer> src_buffer,
-    std::shared_ptr<tt::tt_metal::Buffer> dst_buffer,
-    std::shared_ptr<tt::tt_metal::Buffer> pattern_buffer,
-    size_t num_elements) {
-    
-    if (!initialized_) {
-        throw std::runtime_error("TensTorrent device not initialized");
-    }
-    
-    // Allocate L1 buffer for temporary storage
-    auto l1_buffer = allocate_buffer(3 * TILE_SIZE_BYTES, tt::tt_metal::BufferType::L1);
-    
-    // Set runtime arguments for the gather kernel
-    const std::vector<uint32_t> runtime_args = {
-        src_buffer->address(),
-        dst_buffer->address(), 
-        pattern_buffer->address(),
-        static_cast<uint32_t>(num_elements),
-        l1_buffer->address()
-    };
-    
-    // Use the first active core for legacy gather function
-    if (!active_cores_.empty()) {
-        SetRuntimeArgs(gather_program_, gather_reader_kernel_handle_, active_cores_[0], runtime_args);
-    }
-    
-    // Execute the program
-    EnqueueProgram(*command_queue_, gather_program_, false);
-    Finish(*command_queue_);
-}
+// Legacy method removed - use executeGatherKernel instead
 
 bool TensTorrentDevice::executeGatherKernel(
     std::shared_ptr<tt::tt_metal::Buffer> src_buffer,
@@ -294,7 +253,7 @@ bool TensTorrentDevice::executeGatherKernel(
     uint32_t num_elements,
     uint32_t delta) {
     
-    std::cout << "DEBUG: executeGatherKernel called!" << std::endl;
+    std::cout << "DEBUG: executeGatherKernel (single-kernel approach) called!" << std::endl;
     
     if (!initialized_) {
         std::cout << "DEBUG: executeGatherKernel - device not initialized!" << std::endl;
@@ -302,82 +261,59 @@ bool TensTorrentDevice::executeGatherKernel(
     }
     
     try {
-        std::cout << "\n=== Gather Kernel Execution Debug ===" << std::endl;
+        std::cout << "\n=== Single Gather Kernel Execution ===" << std::endl;
         std::cout << "Total elements to process: " << num_elements << std::endl;
         std::cout << "Delta (stride): " << delta << std::endl;
-        std::cout << "Effective grid size for work distribution: " << effective_grid_size_.x << "x" << effective_grid_size_.y << std::endl;
+        std::cout << "Following loopback example pattern" << std::endl;
         
-        // Use split_work_to_cores utility to distribute work properly using effective grid size
-        auto [num_cores, all_cores, core_group_1, core_group_2, work_per_core1, work_per_core2] = 
-            split_work_to_cores(effective_grid_size_, num_elements);
-            
-        std::cout << "split_work_to_cores result:" << std::endl;
-        std::cout << "  - Cores that will be used: " << num_cores << std::endl;
-        std::cout << "  - Core group 1 work per core: " << work_per_core1 << std::endl;
-        std::cout << "  - Core group 2 work per core: " << work_per_core2 << std::endl;
+        // Start with single core like loopback example
+        constexpr CoreCoord core = {0, 0};
+        std::cout << "Using single core (0,0) for initial implementation" << std::endl;
         
-        // Set runtime arguments for each core following TT-Metal multi-core pattern
-        uint32_t work_offset = 0;
-        uint32_t cores_configured = 0;
-        auto work_groups = {std::make_pair(core_group_1, work_per_core1), 
-                           std::make_pair(core_group_2, work_per_core2)};
+        // Create program (following loopback pattern exactly)
+        Program gather_program = CreateProgram();
         
-        std::cout << "Configuring runtime arguments for cores:" << std::endl;
+        // Allocate L1 buffer for temporary storage (3 tiles: pattern, sparse, dense)
+        constexpr uint32_t tile_size_bytes = 32 * 32 * 2; // BFloat16
+        constexpr uint32_t l1_buffer_size = 3 * tile_size_bytes; // 3 tiles
+        auto l1_buffer = allocate_buffer(l1_buffer_size, tt::tt_metal::BufferType::L1);
         
-        // Iterate through each work group and assign work to cores
-        for (const auto& [ranges, work_per_core] : work_groups) {
-            if (work_per_core == 0) {
-                std::cout << "  Skipping work group with 0 work per core" << std::endl;
-                continue;
+        // Create TensorAccessorArgs for compile-time arguments (following loopback pattern)
+        std::vector<uint32_t> compile_time_args;
+        TensorAccessorArgs(*src_buffer).append_to(compile_time_args);      // sparse buffer
+        TensorAccessorArgs(*dst_buffer).append_to(compile_time_args);      // dense buffer  
+        TensorAccessorArgs(*pattern_buffer).append_to(compile_time_args);  // pattern buffer
+        
+        // Create the single gather kernel (following loopback CreateKernel pattern)
+        KernelHandle gather_kernel_id = CreateKernel(
+            gather_program,
+            "/storage/tt/tt-spatter/src/Spatter/kernels/gather_kernel.cpp",
+            core,
+            DataMovementConfig{
+                .processor = DataMovementProcessor::RISCV_0,
+                .noc = NOC::RISCV_0_default,
+                .compile_args = compile_time_args
             }
-            
-            for (const auto& range : ranges.ranges()) {
-                for (const auto& core : range) {
-                    cores_configured++;
-                    std::cout << "  Core (" << core.x << "," << core.y << "): offset=" << work_offset 
-                              << ", work=" << work_per_core << std::endl;
-                    
-                    // Set runtime arguments for 3-kernel architecture
-                    
-                    // Reader kernel arguments
-                    std::vector<uint32_t> reader_runtime_args = {
-                        src_buffer->address(),      // arg0: src_buffer_addr
-                        pattern_buffer->address(),  // arg1: pattern_buffer_addr  
-                        work_offset,                // arg2: work_offset for this core
-                        work_per_core,              // arg3: work_per_core for this core
-                        delta,                      // arg4: delta stride
-                        num_elements                // arg5: sparse_size for bounds checking
-                    };
-                    SetRuntimeArgs(gather_program_, gather_reader_kernel_handle_, core, reader_runtime_args);
-                    
-                    // Compute kernel arguments
-                    uint32_t num_tiles = (work_per_core + (32*32-1)) / (32*32); // Convert elements to tiles
-                    std::vector<uint32_t> compute_runtime_args = {
-                        num_tiles,                  // arg0: num_tiles to process
-                        delta,                      // arg1: delta stride
-                        32 * 32                     // arg2: elements_per_tile
-                    };
-                    SetRuntimeArgs(gather_program_, gather_compute_kernel_handle_, core, compute_runtime_args);
-                    
-                    // Writer kernel arguments  
-                    std::vector<uint32_t> writer_runtime_args = {
-                        dst_buffer->address(),      // arg0: dst_buffer_addr
-                        num_tiles,                  // arg1: num_tiles to write
-                        work_offset                 // arg2: work_offset for this core
-                    };
-                    SetRuntimeArgs(gather_program_, gather_writer_kernel_handle_, core, writer_runtime_args);
-                    work_offset += work_per_core;
-                }
-            }
-        }
+        );
         
-        std::cout << "Total cores configured: " << cores_configured << std::endl;
-        std::cout << "Total work distributed: " << work_offset << " elements" << std::endl;
+        // Set runtime arguments (following loopback SetRuntimeArgs pattern)
+        const std::vector<uint32_t> runtime_args = {
+            l1_buffer->address(),        // arg0: l1_buffer_addr
+            src_buffer->address(),       // arg1: sparse_buffer_addr  
+            dst_buffer->address(),       // arg2: dense_buffer_addr
+            pattern_buffer->address(),   // arg3: pattern_buffer_addr
+            num_elements,                // arg4: num_elements
+            delta                        // arg5: delta
+        };
         
-        // Execute the program on all cores with a single EnqueueProgram call
-        EnqueueProgram(*command_queue_, gather_program_, false);
+        SetRuntimeArgs(gather_program, gather_kernel_id, core, runtime_args);
+        
+        std::cout << "DEBUG: Executing single gather kernel..." << std::endl;
+        // Execute the program (following loopback execution pattern)
+        EnqueueProgram(*command_queue_, gather_program, false);
         Finish(*command_queue_);
         
+        std::cout << "Single gather kernel execution completed successfully!" << std::endl;
         return true;
         
     } catch (const std::exception& e) {
@@ -393,7 +329,7 @@ bool TensTorrentDevice::executeScatterKernel(
     uint32_t num_elements,
     uint32_t delta) {
     
-    std::cout << "DEBUG: executeScatterKernel called!" << std::endl;
+    std::cout << "DEBUG: executeScatterKernel (single-kernel approach) called!" << std::endl;
     
     if (!initialized_ || !src_buffer || !dst_buffer || !pattern_buffer) {
         std::cout << "DEBUG: executeScatterKernel - initialization check failed!" << std::endl;
@@ -401,64 +337,59 @@ bool TensTorrentDevice::executeScatterKernel(
     }
     
     try {
-        std::cout << "\n=== Scatter Kernel Execution Debug ===" << std::endl;
+        std::cout << "\n=== Single Scatter Kernel Execution ===" << std::endl;
         std::cout << "Total elements to process: " << num_elements << std::endl;
         std::cout << "Delta (stride): " << delta << std::endl;
-        std::cout << "Effective grid size for work distribution: " << effective_grid_size_.x << "x" << effective_grid_size_.y << std::endl;
+        std::cout << "Following loopback example pattern" << std::endl;
         
-        // Use split_work_to_cores utility to distribute work properly using effective grid size
-        auto [num_cores, all_cores, core_group_1, core_group_2, work_per_core1, work_per_core2] = 
-            split_work_to_cores(effective_grid_size_, num_elements);
-            
-        std::cout << "split_work_to_cores result:" << std::endl;
-        std::cout << "  - Cores that will be used: " << num_cores << std::endl;
-        std::cout << "  - Core group 1 work per core: " << work_per_core1 << std::endl;
-        std::cout << "  - Core group 2 work per core: " << work_per_core2 << std::endl;
+        // Start with single core like loopback example
+        constexpr CoreCoord core = {0, 0};
+        std::cout << "Using single core (0,0) for initial implementation" << std::endl;
         
-        // Set runtime arguments for each core following TT-Metal multi-core pattern
-        uint32_t work_offset = 0;
-        uint32_t cores_configured = 0;
-        auto work_groups = {std::make_pair(core_group_1, work_per_core1), 
-                           std::make_pair(core_group_2, work_per_core2)};
+        // Create program (following loopback pattern exactly)
+        Program scatter_program = CreateProgram();
         
-        std::cout << "Configuring runtime arguments for cores:" << std::endl;
+        // Allocate L1 buffer for temporary storage (3 tiles: pattern, dense, sparse)
+        constexpr uint32_t tile_size_bytes = 32 * 32 * 2; // BFloat16
+        constexpr uint32_t l1_buffer_size = 3 * tile_size_bytes; // 3 tiles
+        auto l1_buffer = allocate_buffer(l1_buffer_size, tt::tt_metal::BufferType::L1);
         
-        // Iterate through each work group and assign work to cores
-        for (const auto& [ranges, work_per_core] : work_groups) {
-            if (work_per_core == 0) {
-                std::cout << "  Skipping work group with 0 work per core" << std::endl;
-                continue;
+        // Create TensorAccessorArgs for compile-time arguments (following loopback pattern)
+        std::vector<uint32_t> compile_time_args;
+        TensorAccessorArgs(*src_buffer).append_to(compile_time_args);      // dense buffer (source)
+        TensorAccessorArgs(*dst_buffer).append_to(compile_time_args);      // sparse buffer (destination)
+        TensorAccessorArgs(*pattern_buffer).append_to(compile_time_args);  // pattern buffer
+        
+        // Create the single scatter kernel (following loopback CreateKernel pattern)
+        KernelHandle scatter_kernel_id = CreateKernel(
+            scatter_program,
+            "/storage/tt/tt-spatter/src/Spatter/kernels/scatter_kernel.cpp",
+            core,
+            DataMovementConfig{
+                .processor = DataMovementProcessor::RISCV_0,
+                .noc = NOC::RISCV_0_default,
+                .compile_args = compile_time_args
             }
-            
-            for (const auto& range : ranges.ranges()) {
-                for (const auto& core : range) {
-                    cores_configured++;
-                    std::cout << "  Core (" << core.x << "," << core.y << "): offset=" << work_offset 
-                              << ", work=" << work_per_core << std::endl;
-                    
-                    // Set runtime arguments for this core
-                    std::vector<uint32_t> core_runtime_args = {
-                        src_buffer->address(),      // arg0: src_buffer_addr (dense)
-                        dst_buffer->address(),      // arg1: dst_buffer_addr (sparse)
-                        pattern_buffer->address(),  // arg2: pattern_buffer_addr
-                        work_offset,                // arg3: work_offset for this core
-                        work_per_core,              // arg4: work_per_core for this core
-                        delta                       // arg5: delta stride
-                    };
-                    
-                    SetRuntimeArgs(scatter_program_, scatter_reader_kernel_handle_, core, core_runtime_args);
-                    work_offset += work_per_core;
-                }
-            }
-        }
+        );
         
-        std::cout << "Total cores configured: " << cores_configured << std::endl;
-        std::cout << "Total work distributed: " << work_offset << " elements" << std::endl;
+        // Set runtime arguments (following loopback SetRuntimeArgs pattern)
+        const std::vector<uint32_t> runtime_args = {
+            l1_buffer->address(),        // arg0: l1_buffer_addr
+            src_buffer->address(),       // arg1: dense_buffer_addr (source)
+            dst_buffer->address(),       // arg2: sparse_buffer_addr (destination) 
+            pattern_buffer->address(),   // arg3: pattern_buffer_addr
+            num_elements,                // arg4: num_elements
+            delta                        // arg5: delta
+        };
         
-        // Execute the program on all cores with a single EnqueueProgram call
-        EnqueueProgram(*command_queue_, scatter_program_, false);
+        SetRuntimeArgs(scatter_program, scatter_kernel_id, core, runtime_args);
+        
+        std::cout << "DEBUG: Executing single scatter kernel..." << std::endl;
+        // Execute the program (following loopback execution pattern)
+        EnqueueProgram(*command_queue_, scatter_program, false);
         Finish(*command_queue_);
         
+        std::cout << "Single scatter kernel execution completed successfully!" << std::endl;
         return true;
         
     } catch (const std::exception& e) {
@@ -467,50 +398,9 @@ bool TensTorrentDevice::executeScatterKernel(
     }
 }
 
-void TensTorrentDevice::execute_scatter_kernel(
-    std::shared_ptr<tt::tt_metal::Buffer> src_buffer,
-    std::shared_ptr<tt::tt_metal::Buffer> dst_buffer,
-    std::shared_ptr<tt::tt_metal::Buffer> pattern_buffer,
-    size_t num_elements) {
-    
-    if (!initialized_) {
-        throw std::runtime_error("TensTorrent device not initialized");
-    }
-    
-    // Similar implementation to gather but with scatter logic
-    // For now, throw as not implemented
-    throw std::runtime_error("Scatter kernel not yet implemented");
-}
+// Legacy method removed - use executeScatterKernel instead
 
-void TensTorrentDevice::execute_noc_bandwidth_kernel(
-    std::shared_ptr<tt::tt_metal::Buffer> src_buffer,
-    std::shared_ptr<tt::tt_metal::Buffer> dst_buffer,
-    size_t num_tiles,
-    uint32_t neighbor_x,
-    uint32_t neighbor_y) {
-    
-    if (!initialized_) {
-        throw std::runtime_error("TensTorrent device not initialized");
-    }
-    
-    // Set runtime arguments for NOC bandwidth kernel
-    std::vector<uint32_t> runtime_args = {
-        static_cast<uint32_t>(src_buffer->address()),  // Source buffer address
-        static_cast<uint32_t>(dst_buffer->address()),  // Destination buffer address  
-        static_cast<uint32_t>(num_tiles),              // Number of tiles to transfer
-        neighbor_x,                                    // Neighbor NOC X coordinate
-        neighbor_y                                     // Neighbor NOC Y coordinate
-    };
-    
-    // Use the first active core for NOC bandwidth test
-    if (!active_cores_.empty()) {
-        SetRuntimeArgs(noc_bandwidth_program_, noc_bandwidth_kernel_handle_, active_cores_[0], runtime_args);
-    }
-    
-    // Execute the NOC bandwidth kernel
-    EnqueueProgram(*command_queue_, noc_bandwidth_program_, false);
-    Finish(*command_queue_);
-}
+// Method removed - NOC bandwidth kernel no longer available
 
 std::string TensTorrentDevice::get_device_info() const {
     if (!initialized_) {
@@ -526,138 +416,25 @@ size_t TensTorrentDevice::get_max_memory() const {
 }
 
 void TensTorrentDevice::compile_kernels() {
-    // Get the compute core range from the device using effective grid size
-    // This creates a CoreRangeSet covering the effective compute cores
-    CoreRangeSet all_cores = CoreRangeSet(CoreRange(CoreCoord{0, 0}, CoreCoord{effective_grid_size_.x - 1, effective_grid_size_.y - 1}));
+    std::cout << "=== Single-Kernel Architecture Compilation ===" << std::endl;
+    std::cout << "Following loopback example pattern for pure data movement" << std::endl;
     
-    std::cout << "=== 3-Kernel Architecture Compilation Debug ===" << std::endl;
-    std::cout << "Compiling kernels on effective grid: " << effective_grid_size_.x << "x" << effective_grid_size_.y << " cores" << std::endl;
-    std::cout << "Kernel compilation range: (0,0) to (" << (effective_grid_size_.x - 1) << "," << (effective_grid_size_.y - 1) << ")" << std::endl;
+    // For single-kernel approach, we don't need to pre-compile anything
+    // Programs and kernels will be created on-demand with proper TensorAccessorArgs
+    // This matches the loopback example pattern exactly
     
-    // Constants for circular buffers
-    constexpr uint32_t single_tile_size = 32 * 32 * 2; // BFloat16 tile size = 2048 bytes
-    constexpr uint32_t num_tiles_per_cb = 2; // Double buffering
-    const auto cb_data_format = tt::DataFormat::Float16_b;
-    
-    // ===============================
-    // GATHER PROGRAM SETUP
-    // ===============================
-    gather_program_ = CreateProgram();
-    
-    // Create circular buffers for gather operation (following matmul pattern)
-    // CB_c_0: Sparse data (from reader to compute)
-    tt::tt_metal::CreateCircularBuffer(
-        gather_program_,
-        all_cores,
-        CircularBufferConfig(num_tiles_per_cb * single_tile_size, {{tt::CBIndex::c_0, cb_data_format}})
-            .set_page_size(tt::CBIndex::c_0, single_tile_size)
-    );
-    
-    // CB_c_1: Pattern data (from reader to compute)
-    tt::tt_metal::CreateCircularBuffer(
-        gather_program_,
-        all_cores,
-        CircularBufferConfig(num_tiles_per_cb * single_tile_size, {{tt::CBIndex::c_1, cb_data_format}})
-            .set_page_size(tt::CBIndex::c_1, single_tile_size)
-    );
-    
-    // CB_c_16: Output data (from compute to writer)
-    tt::tt_metal::CreateCircularBuffer(
-        gather_program_,
-        all_cores,
-        CircularBufferConfig(num_tiles_per_cb * single_tile_size, {{tt::CBIndex::c_16, cb_data_format}})
-            .set_page_size(tt::CBIndex::c_16, single_tile_size)
-    );
-    
-    // Create gather kernels (3-kernel architecture)
-    std::vector<uint32_t> reader_compile_args;
-    // TODO: Add TensorAccessor compile args when buffers are known
-    
-    // Reader kernel (RISCV_1, NOC_1)
-    gather_reader_kernel_handle_ = CreateKernel(
-        gather_program_,
-        "/storage/tt/tt-spatter/src/Spatter/kernels/dataflow/reader_gather.cpp",
-        all_cores,
-        DataMovementConfig{
-            .processor = DataMovementProcessor::RISCV_1,
-            .noc = NOC::RISCV_1_default,
-            .compile_args = reader_compile_args
-        }
-    );
-    
-    // Compute kernel (Math cores)
-    gather_compute_kernel_handle_ = CreateKernel(
-        gather_program_,
-        "/storage/tt/tt-spatter/src/Spatter/kernels/compute/gather_compute.cpp",
-        all_cores,
-        ComputeConfig{
-            .math_fidelity = MathFidelity::HiFi4,
-            .compile_args = {}
-        }
-    );
-    
-    // Writer kernel (RISCV_0, NOC_0)
-    std::vector<uint32_t> writer_compile_args;
-    gather_writer_kernel_handle_ = CreateKernel(
-        gather_program_,
-        "/storage/tt/tt-spatter/src/Spatter/kernels/dataflow/writer_gather.cpp",
-        all_cores,
-        DataMovementConfig{
-            .processor = DataMovementProcessor::RISCV_0,
-            .noc = NOC::RISCV_0_default,
-            .compile_args = writer_compile_args
-        }
-    );
-    
-    // ===============================
-    // SCATTER PROGRAM SETUP (TODO)
-    // ===============================
-    scatter_program_ = CreateProgram();
-    // TODO: Implement scatter 3-kernel architecture
-    
-    // ===============================
-    // NOC BANDWIDTH TEST PROGRAM
-    // ===============================
-    noc_bandwidth_program_ = CreateProgram();
-    
-    // For NOC bandwidth test, we only need one core
-    CoreCoord single_core = CoreCoord{0, 0};
-    std::vector<uint32_t> noc_compile_args;
-    noc_bandwidth_kernel_handle_ = CreateKernel(
-        noc_bandwidth_program_,
-        "/storage/tt/tt-spatter/src/Spatter/kernels/noc_bandwidth_kernel.cpp",
-        single_core,
-        DataMovementConfig{
-            .processor = DataMovementProcessor::RISCV_0,
-            .noc = NOC::RISCV_0_default,
-            .compile_args = noc_compile_args
-        }
-    );
-    
-    std::cout << "3-Kernel architecture compilation completed on all compute cores" << std::endl;
+    std::cout << "Single-kernel compilation setup completed" << std::endl;
 }
+
+// Method removed - using single-kernel approach following loopback pattern
+
+// Method removed - duplicated functionality with initializeGatherProgram
 
 size_t TensTorrentDevice::align_to_tile_size(size_t size) const {
     return ((size + TILE_SIZE_BYTES - 1) / TILE_SIZE_BYTES) * TILE_SIZE_BYTES;
 }
 
-std::vector<float> TensTorrentDevice::convert_double_to_bfloat16(const std::vector<double>& input) const {
-    std::vector<float> output;
-    output.reserve(input.size());
-    for (double val : input) {
-        output.push_back(static_cast<float>(val));
-    }
-    return output;
-}
-
-std::vector<double> TensTorrentDevice::convert_bfloat16_to_double(const std::vector<float>& input) const {
-    std::vector<double> output;
-    output.reserve(input.size());
-    for (float val : input) {
-        output.push_back(static_cast<double>(val));
-    }
-    return output;
-}
+// Conversion methods removed - conversion handled directly in write_buffer/read_buffer
 
 // Helper functions
 void check_tt_error(const std::string& operation) {
