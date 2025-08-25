@@ -1084,7 +1084,24 @@ void Configuration<Spatter::TensTorrent>::setup() {
 void Configuration<Spatter::TensTorrent>::gather(bool timed, unsigned long run_id) {
     std::cout << "DEBUG: Configuration::gather method called!" << std::endl;
     
+    // Hard-coded debug flag - set to true to enable validation
+    constexpr bool VALIDATE_RESULTS = true;  // Toggle this for debugging
+    
     size_t pattern_length = this->pattern.size();
+    aligned_vector<double> golden_dense;
+    
+    // Compute golden result if validation is enabled
+    if (VALIDATE_RESULTS) {
+        std::cout << "\n=== VALIDATION ENABLED: Computing golden result ===\n";
+        golden_dense = this->dense;  // Save current state
+      
+        // This IS the exact code from Configuration<Spatter::Serial>::gather (lines 415-417)
+        for (size_t i = 0; i < this->count; ++i)
+            for (size_t j = 0; j < pattern_length; ++j)
+                golden_dense[j + pattern_length * (i % this->wrap)] = this->sparse[this->pattern[j] + this->delta * i];
+        
+        std::cout << "Golden result computed using Serial::gather() algorithm\n";
+    }
     
     if (timed)
         this->timer.start();
@@ -1112,7 +1129,8 @@ void Configuration<Spatter::TensTorrent>::gather(bool timed, unsigned long run_i
             tt_dense_buffer_,      // dst_buffer  
             tt_pattern_buffer_,    // pattern_buffer
             static_cast<uint32_t>(pattern_length * this->count), // total elements
-            static_cast<uint32_t>(this->delta)  // stride
+            static_cast<uint32_t>(this->delta),  // stride
+            static_cast<uint32_t>(pattern_length)  // pattern_length for reuse
         );
         
         if (!kernel_result) {
@@ -1126,6 +1144,41 @@ void Configuration<Spatter::TensTorrent>::gather(bool timed, unsigned long run_i
         } else {
             // Read back results from device
             tt_device_->readBuffer(tt_dense_buffer_, this->dense);
+            
+            // Validate results if enabled
+            if (VALIDATE_RESULTS) {
+                std::cout << "\n=== VALIDATING RESULTS ===\n";
+                int mismatches = 0;
+                double max_error = 0.0;
+                
+                for (size_t i = 0; i < this->dense.size(); ++i) {
+                    double error = std::abs(this->dense[i] - golden_dense[i]);
+                    max_error = std::max(max_error, error);
+                    
+                    if (error > 0.001) {  // BFloat16 tolerance
+                        if (mismatches < 5) {  // Show first 5 mismatches
+                            std::cout << "Mismatch[" << i << "]: "
+                                     << "TT=" << this->dense[i] 
+                                     << " Expected=" << golden_dense[i]
+                                     << " Error=" << error << std::endl;
+                        }
+                        mismatches++;
+                    }
+                }
+                
+                std::cout << "\nValidation Summary:\n";
+                std::cout << "  Total elements: " << this->dense.size() << std::endl;
+                std::cout << "  Mismatches: " << mismatches << std::endl;
+                std::cout << "  Max error: " << max_error << std::endl;
+                
+                if (mismatches == 0) {
+                    std::cout << "  ✓ VALIDATION PASSED - All results match!\n";
+                } else {
+                    std::cout << "  ✗ VALIDATION FAILED - " << mismatches 
+                             << " mismatches found\n";
+                }
+                std::cout << "===========================\n\n";
+            }
         }
         
     } catch (const std::exception& e) {
@@ -1146,7 +1199,27 @@ void Configuration<Spatter::TensTorrent>::gather(bool timed, unsigned long run_i
 }
 
 void Configuration<Spatter::TensTorrent>::scatter(bool timed, unsigned long run_id) {
+    // Hard-coded debug flag - set to true to enable validation
+    constexpr bool VALIDATE_RESULTS = true;  // Toggle this for debugging
+    
     size_t pattern_length = this->pattern.size();
+    aligned_vector<double> golden_sparse;
+    
+    // Compute golden result if validation is enabled
+    if (VALIDATE_RESULTS) {
+        std::cout << "\n=== VALIDATION ENABLED: Computing golden result for scatter ===\n";
+        golden_sparse = this->sparse;  // Copy initial sparse buffer
+        
+        // We can't easily call Configuration<Spatter::Serial>::scatter() directly because
+        // it's a member function that operates on its own instance variables.
+        // So we'll use the same algorithm that Serial::scatter() uses.
+        // This IS the exact code from Configuration<Spatter::Serial>::scatter (lines 436-438)
+        for (size_t i = 0; i < this->count; ++i)
+            for (size_t j = 0; j < pattern_length; ++j)
+                golden_sparse[this->pattern[j] + this->delta * i] = this->dense[j + pattern_length * (i % this->wrap)];
+        
+        std::cout << "Golden result computed using Serial::scatter() algorithm\n";
+    }
     
     if (timed)
         this->timer.start();
@@ -1177,6 +1250,41 @@ void Configuration<Spatter::TensTorrent>::scatter(bool timed, unsigned long run_
         } else {
             // Read back results from device
             tt_device_->readBuffer(tt_sparse_buffer_, this->sparse);
+            
+            // Validate results if enabled
+            if (VALIDATE_RESULTS) {
+                std::cout << "\n=== VALIDATING SCATTER RESULTS ===\n";
+                int mismatches = 0;
+                double max_error = 0.0;
+                
+                for (size_t i = 0; i < this->sparse.size(); ++i) {
+                    double error = std::abs(this->sparse[i] - golden_sparse[i]);
+                    max_error = std::max(max_error, error);
+                    
+                    if (error > 0.001) {  // BFloat16 tolerance
+                        if (mismatches < 5) {  // Show first 5 mismatches
+                            std::cout << "Mismatch[" << i << "]: "
+                                     << "TT=" << this->sparse[i] 
+                                     << " Expected=" << golden_sparse[i]
+                                     << " Error=" << error << std::endl;
+                        }
+                        mismatches++;
+                    }
+                }
+                
+                std::cout << "\nValidation Summary:\n";
+                std::cout << "  Total elements: " << this->sparse.size() << std::endl;
+                std::cout << "  Mismatches: " << mismatches << std::endl;
+                std::cout << "  Max error: " << max_error << std::endl;
+                
+                if (mismatches == 0) {
+                    std::cout << "  ✓ VALIDATION PASSED - All results match!\n";
+                } else {
+                    std::cout << "  ✗ VALIDATION FAILED - " << mismatches 
+                             << " mismatches found\n";
+                }
+                std::cout << "===========================\n\n";
+            }
         }
         
     } catch (const std::exception& e) {

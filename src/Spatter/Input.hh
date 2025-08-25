@@ -673,6 +673,17 @@ int parse_input(const int argc, char **argv, ClArgs &cl) {
       compress_pattern(pattern_scatter);
   }
 
+  // Adjust count for pattern reuse: -l specifies total elements, but count should be iterations
+  // Total elements = pattern.size() * count, so count = total_elements / pattern.size()
+  if (pattern.size() > 0) {
+    size_t total_elements = count;
+    count = total_elements / pattern.size();
+    if (verbosity >= 2) {
+      std::cout << "Adjusted count from " << total_elements << " to " << count 
+                << " iterations for pattern size " << pattern.size() << std::endl;
+    }
+  }
+
   if (!json) {
     std::unique_ptr<Spatter::ConfigurationBase> c;
     if (backend.compare("serial") == 0)

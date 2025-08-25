@@ -66,7 +66,8 @@ public:
         std::shared_ptr<tt::tt_metal::Buffer> dst_buffer,
         std::shared_ptr<tt::tt_metal::Buffer> pattern_buffer,
         uint32_t num_elements,
-        uint32_t delta);
+        uint32_t delta,
+        uint32_t pattern_length = 0);
         
     bool executeScatterKernel(
         std::shared_ptr<tt::tt_metal::Buffer> src_buffer,

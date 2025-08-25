@@ -8,6 +8,7 @@
 
 #include <iostream>
 #include <stdexcept>
+#include <set>
 #include "AlignedAllocator.hh"
 #include <algorithm>
 #include <tt-metalium/bfloat16.hpp>
@@ -113,12 +114,25 @@ std::shared_ptr<tt::tt_metal::Buffer> TensTorrentDevice::allocate_buffer(size_t 
         throw std::runtime_error("TensTorrent device not initialized");
     }
     
+    // Debug: Print original size
+    std::cout << "DEBUG: allocate_buffer - original size_bytes: " << size_bytes << std::endl;
+    
     // Align size to proper boundaries
     size_t aligned_size = align_to_tile_size(size_bytes);
+    std::cout << "DEBUG: allocate_buffer - after tile alignment: " << aligned_size << std::endl;
+    
     if (type == tt::tt_metal::BufferType::DRAM) {
         // Blackhole requires 64B alignment for DRAM
+        size_t before_dram = aligned_size;
         aligned_size = ((aligned_size + DRAM_ALIGNMENT - 1) / DRAM_ALIGNMENT) * DRAM_ALIGNMENT;
+        std::cout << "DEBUG: allocate_buffer - after DRAM alignment: " << aligned_size 
+                  << " (was " << before_dram << ")" << std::endl;
     }
+    
+    // Check if this is a potentially problematic size
+    bool is_power_of_2 = (aligned_size & (aligned_size - 1)) == 0;
+    std::cout << "DEBUG: allocate_buffer - is power of 2: " << is_power_of_2 
+              << ", size in KB: " << (aligned_size / 1024) << std::endl;
     
     InterleavedBufferConfig config{
         .device = device_,
@@ -127,7 +141,19 @@ std::shared_ptr<tt::tt_metal::Buffer> TensTorrentDevice::allocate_buffer(size_t 
         .buffer_type = type
     };
     
-    return CreateBuffer(config);
+    std::cout << "DEBUG: allocate_buffer - page_size: " << config.page_size 
+              << ", num pages: " << (aligned_size / config.page_size) << std::endl;
+    
+    try {
+        auto buffer = CreateBuffer(config);
+        std::cout << "DEBUG: allocate_buffer - CreateBuffer succeeded, address: " 
+                  << std::hex << buffer->address() << std::dec << std::endl;
+        return buffer;
+    } catch (const std::exception& e) {
+        std::cerr << "ERROR: CreateBuffer failed with size " << aligned_size 
+                  << " bytes: " << e.what() << std::endl;
+        throw;
+    }
 }
 
 // Method removed - use allocate_buffer directly
@@ -138,13 +164,42 @@ void TensTorrentDevice::write_buffer(std::shared_ptr<tt::tt_metal::Buffer> buffe
         throw std::runtime_error("TensTorrent device not initialized");
     }
     
+    // Memory validation checks
+    if (!buffer) {
+        throw std::runtime_error("Invalid buffer pointer in write_buffer");
+    }
+    
+    if (data.empty()) {
+        std::cout << "DEBUG: write_buffer called with empty data vector" << std::endl;
+        return;
+    }
+    
     // Store the original size for later reads
     buffer_sizes_[buffer] = data.size();
-    std::cout << "DEBUG: write_buffer storing size " << data.size() << " for buffer" << std::endl;
+    std::cout << "DEBUG: write_buffer - buffer addr: " << buffer.get() 
+              << ", device buffer addr: " << std::hex << buffer->address() << std::dec
+              << ", size: " << data.size() << " elements" << std::endl;
+    std::cout << "DEBUG: write_buffer - host data ptr: " << data.data() 
+              << ", data size bytes: " << (data.size() * sizeof(double)) << std::endl;
     
     // Convert double to bfloat16 format and pad to tile alignment if needed
     size_t tile_elements = TILE_SIZE_BYTES / sizeof(bfloat16); // 1024 elements per tile
     size_t aligned_size = ((data.size() + tile_elements - 1) / tile_elements) * tile_elements;
+    
+    // WORKAROUND TEMPORARILY DISABLED FOR BUG DEMONSTRATION
+    // const std::set<size_t> problematic_sizes = {
+    //     65536, 262144, 524288, 1048576, 8388608, 16777216,
+    //     500000, 5000000  // Half of 1M and 10M also problematic
+    // };
+    // 
+    // if (problematic_sizes.count(aligned_size) > 0) {
+    //     std::cout << "WARNING: Detected problematic size " << aligned_size 
+    //               << ", adding extra tile to avoid TT-Metal bug" << std::endl;
+    //     aligned_size += tile_elements; // Add one more tile to avoid the exact problematic size
+    // }
+    
+    std::cout << "DEBUG: write_buffer - Creating vector with aligned_size: " << aligned_size 
+              << " for " << data.size() << " elements" << std::endl;
     
     std::vector<bfloat16> tt_data;
     tt_data.reserve(aligned_size);
@@ -159,7 +214,31 @@ void TensTorrentDevice::write_buffer(std::shared_ptr<tt::tt_metal::Buffer> buffe
         tt_data.push_back(bfloat16(0.0f));
     }
     
-    EnqueueWriteBuffer(*command_queue_, buffer, tt_data, blocking);
+    // Additional validation before TT-Metal API call
+    std::cout << "DEBUG: write_buffer - converted data size: " << tt_data.size() 
+              << " elements, aligned_size: " << aligned_size << std::endl;
+    std::cout << "DEBUG: write_buffer - tt_data ptr: " << tt_data.data() 
+              << ", capacity: " << tt_data.capacity() << std::endl;
+    std::cout << "DEBUG: write_buffer - buffer size: " << buffer->size() 
+              << " bytes, page_size: " << buffer->page_size() << std::endl;
+    
+    // Validate that converted data isn't empty or null
+    if (tt_data.empty() || !tt_data.data()) {
+        throw std::runtime_error("Invalid converted data for TT-Metal buffer write");
+    }
+    
+    try {
+        std::cout << "DEBUG: About to call EnqueueWriteBuffer..." << std::endl;
+        EnqueueWriteBuffer(*command_queue_, buffer, tt_data, blocking);
+        std::cout << "DEBUG: EnqueueWriteBuffer completed successfully" << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "ERROR: EnqueueWriteBuffer failed: " << e.what() << std::endl;
+        std::cerr << "ERROR: Buffer details - size: " << buffer->size() 
+                  << ", address: " << std::hex << buffer->address() << std::dec << std::endl;
+        std::cerr << "ERROR: Data details - size: " << tt_data.size() 
+                  << " elements, ptr: " << tt_data.data() << std::endl;
+        throw;
+    }
 }
 
 void TensTorrentDevice::read_buffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
@@ -251,7 +330,8 @@ bool TensTorrentDevice::executeGatherKernel(
     std::shared_ptr<tt::tt_metal::Buffer> dst_buffer,
     std::shared_ptr<tt::tt_metal::Buffer> pattern_buffer,
     uint32_t num_elements,
-    uint32_t delta) {
+    uint32_t delta,
+    uint32_t pattern_length) {
     
     std::cout << "DEBUG: executeGatherKernel (single-kernel approach) called!" << std::endl;
     
@@ -296,14 +376,19 @@ bool TensTorrentDevice::executeGatherKernel(
             }
         );
         
+        std::cout << "DEBUG: Pattern length passed as: " << pattern_length << std::endl;
+        std::cout << "DEBUG: Total elements to process: " << num_elements << std::endl;
+        std::cout << "DEBUG: Count (iterations): " << (num_elements / pattern_length) << std::endl;
+        
         // Set runtime arguments (following loopback SetRuntimeArgs pattern)
         const std::vector<uint32_t> runtime_args = {
             l1_buffer->address(),        // arg0: l1_buffer_addr
             src_buffer->address(),       // arg1: sparse_buffer_addr  
             dst_buffer->address(),       // arg2: dense_buffer_addr
             pattern_buffer->address(),   // arg3: pattern_buffer_addr
-            num_elements,                // arg4: num_elements
-            delta                        // arg5: delta
+            num_elements,                // arg4: num_elements (total elements to process)
+            delta,                       // arg5: delta
+            pattern_length               // arg6: pattern_length (for pattern reuse)
         };
         
         SetRuntimeArgs(gather_program, gather_kernel_id, core, runtime_args);
