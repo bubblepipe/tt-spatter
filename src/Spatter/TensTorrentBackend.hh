@@ -80,6 +80,13 @@ public:
     std::string get_device_info() const;
     size_t get_max_memory() const;
     
+    // Synchronization
+    void sync() {
+        if (command_queue_) {
+            tt::tt_metal::Finish(*command_queue_);
+        }
+    }
+    
 private:
     int device_id_;
     bool initialized_;

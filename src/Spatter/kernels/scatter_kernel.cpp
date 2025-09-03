@@ -14,21 +14,25 @@
  * 
  * Runtime Args:
  * - arg0: l1_buffer_addr - L1 temporary buffer address
- * - arg1: dense_buffer_addr - Source (dense) buffer address in DRAM
- * - arg2: sparse_buffer_addr - Destination (sparse) buffer address in DRAM
- * - arg3: pattern_buffer_addr - Pattern array buffer address in DRAM
- * - arg4: num_elements - Number of elements to process
- * - arg5: delta - Stride parameter for iterations
+ * - arg1: num_elements - Number of elements to process
+ * - arg2: delta - Stride parameter for iterations
+ * 
+ * Compile-time Args (via TensorAccessorArgs):
+ * - Dense buffer configuration (source)
+ * - Sparse buffer configuration (destination)
+ * - Pattern buffer configuration
  */
 
 void kernel_main() {
     // Read parameters from kernel arguments (following loopback pattern)
     uint32_t l1_buffer_addr = get_arg_val<uint32_t>(0);
-    uint32_t dense_buffer_addr = get_arg_val<uint32_t>(1);
-    uint32_t sparse_buffer_addr = get_arg_val<uint32_t>(2);
-    uint32_t pattern_buffer_addr = get_arg_val<uint32_t>(3);
-    uint32_t num_elements = get_arg_val<uint32_t>(4);
-    uint32_t delta = get_arg_val<uint32_t>(5);
+    uint32_t num_elements = get_arg_val<uint32_t>(1);
+    uint32_t delta = get_arg_val<uint32_t>(2);
+    
+    // Get buffer addresses from runtime args (these are the actual DRAM addresses now)
+    uint32_t dense_buffer_addr = get_arg_val<uint32_t>(3);
+    uint32_t sparse_buffer_addr = get_arg_val<uint32_t>(4);
+    uint32_t pattern_buffer_addr = get_arg_val<uint32_t>(5);
 
     // Each tile is 32x32 elements of bfloat16, which is 2 bytes per element.
     // So the tile size in bytes is 32 * 32 * 2 = 2048 bytes.
@@ -36,6 +40,7 @@ void kernel_main() {
     const uint32_t elements_per_tile = 32 * 32;
 
     // Create TensorAccessors for all buffers (following loopback pattern exactly)
+    // Buffer configurations are passed via compile-time TensorAccessorArgs
     constexpr auto dense_args = TensorAccessorArgs<0>();
     const auto dense_accessor = TensorAccessor(dense_args, dense_buffer_addr, tile_size_bytes);
 

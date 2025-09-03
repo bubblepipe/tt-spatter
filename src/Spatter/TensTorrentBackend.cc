@@ -164,79 +164,38 @@ void TensTorrentDevice::write_buffer(std::shared_ptr<tt::tt_metal::Buffer> buffe
         throw std::runtime_error("TensTorrent device not initialized");
     }
     
-    // Memory validation checks
     if (!buffer) {
         throw std::runtime_error("Invalid buffer pointer in write_buffer");
     }
     
     if (data.empty()) {
-        std::cout << "DEBUG: write_buffer called with empty data vector" << std::endl;
         return;
     }
     
-    // Store the original size for later reads
     buffer_sizes_[buffer] = data.size();
-    std::cout << "DEBUG: write_buffer - buffer addr: " << buffer.get() 
-              << ", device buffer addr: " << std::hex << buffer->address() << std::dec
-              << ", size: " << data.size() << " elements" << std::endl;
-    std::cout << "DEBUG: write_buffer - host data ptr: " << data.data() 
-              << ", data size bytes: " << (data.size() * sizeof(double)) << std::endl;
     
-    // Convert double to bfloat16 format and pad to tile alignment if needed
-    size_t tile_elements = TILE_SIZE_BYTES / sizeof(bfloat16); // 1024 elements per tile
+    size_t tile_elements = TILE_SIZE_BYTES / sizeof(bfloat16);
     size_t aligned_size = ((data.size() + tile_elements - 1) / tile_elements) * tile_elements;
-    
-    // WORKAROUND TEMPORARILY DISABLED FOR BUG DEMONSTRATION
-    // const std::set<size_t> problematic_sizes = {
-    //     65536, 262144, 524288, 1048576, 8388608, 16777216,
-    //     500000, 5000000  // Half of 1M and 10M also problematic
-    // };
-    // 
-    // if (problematic_sizes.count(aligned_size) > 0) {
-    //     std::cout << "WARNING: Detected problematic size " << aligned_size 
-    //               << ", adding extra tile to avoid TT-Metal bug" << std::endl;
-    //     aligned_size += tile_elements; // Add one more tile to avoid the exact problematic size
-    // }
-    
-    std::cout << "DEBUG: write_buffer - Creating vector with aligned_size: " << aligned_size 
-              << " for " << data.size() << " elements" << std::endl;
     
     std::vector<bfloat16> tt_data;
     tt_data.reserve(aligned_size);
     
-    // Copy actual data
     for (size_t i = 0; i < data.size(); ++i) {
         tt_data.push_back(bfloat16(static_cast<float>(data[i])));
     }
     
-    // Pad with zeros to tile alignment
     for (size_t i = data.size(); i < aligned_size; ++i) {
         tt_data.push_back(bfloat16(0.0f));
     }
     
-    // Additional validation before TT-Metal API call
-    std::cout << "DEBUG: write_buffer - converted data size: " << tt_data.size() 
-              << " elements, aligned_size: " << aligned_size << std::endl;
-    std::cout << "DEBUG: write_buffer - tt_data ptr: " << tt_data.data() 
-              << ", capacity: " << tt_data.capacity() << std::endl;
-    std::cout << "DEBUG: write_buffer - buffer size: " << buffer->size() 
-              << " bytes, page_size: " << buffer->page_size() << std::endl;
-    
-    // Validate that converted data isn't empty or null
     if (tt_data.empty() || !tt_data.data()) {
         throw std::runtime_error("Invalid converted data for TT-Metal buffer write");
     }
     
     try {
-        std::cout << "DEBUG: About to call EnqueueWriteBuffer..." << std::endl;
         EnqueueWriteBuffer(*command_queue_, buffer, tt_data, blocking);
-        std::cout << "DEBUG: EnqueueWriteBuffer completed successfully" << std::endl;
     } catch (const std::exception& e) {
         std::cerr << "ERROR: EnqueueWriteBuffer failed: " << e.what() << std::endl;
-        std::cerr << "ERROR: Buffer details - size: " << buffer->size() 
-                  << ", address: " << std::hex << buffer->address() << std::dec << std::endl;
-        std::cerr << "ERROR: Data details - size: " << tt_data.size() 
-                  << " elements, ptr: " << tt_data.data() << std::endl;
         throw;
     }
 }
@@ -250,19 +209,14 @@ void TensTorrentDevice::read_buffer(std::shared_ptr<tt::tt_metal::Buffer> buffer
     std::vector<bfloat16> tt_data;
     EnqueueReadBuffer(*command_queue_, buffer, tt_data, blocking);
     
-    // Get the original size that was written
     size_t original_size = tt_data.size();
-    std::cout << "DEBUG: read_buffer tt_data.size() = " << tt_data.size() << std::endl;
     if (buffer_sizes_.find(buffer) != buffer_sizes_.end()) {
         original_size = buffer_sizes_[buffer];
-        std::cout << "DEBUG: read_buffer found stored size " << original_size << std::endl;
-    } else {
-        std::cout << "DEBUG: read_buffer buffer not found in map, using tt_data.size()" << std::endl;
     }
     
-    // Convert bfloat16 back to double, only for the original size
     data.clear();
     data.reserve(original_size);
+    
     for (size_t i = 0; i < std::min(original_size, tt_data.size()); ++i) {
         data.push_back(static_cast<double>(tt_data[i].to_float()));
     }
@@ -333,38 +287,23 @@ bool TensTorrentDevice::executeGatherKernel(
     uint32_t delta,
     uint32_t pattern_length) {
     
-    std::cout << "DEBUG: executeGatherKernel (single-kernel approach) called!" << std::endl;
-    
     if (!initialized_) {
-        std::cout << "DEBUG: executeGatherKernel - device not initialized!" << std::endl;
         return false;
     }
     
     try {
-        std::cout << "\n=== Single Gather Kernel Execution ===" << std::endl;
-        std::cout << "Total elements to process: " << num_elements << std::endl;
-        std::cout << "Delta (stride): " << delta << std::endl;
-        std::cout << "Following loopback example pattern" << std::endl;
-        
-        // Start with single core like loopback example
         constexpr CoreCoord core = {0, 0};
-        std::cout << "Using single core (0,0) for initial implementation" << std::endl;
-        
-        // Create program (following loopback pattern exactly)
         Program gather_program = CreateProgram();
         
-        // Allocate L1 buffer for temporary storage (3 tiles: pattern, sparse, dense)
-        constexpr uint32_t tile_size_bytes = 32 * 32 * 2; // BFloat16
-        constexpr uint32_t l1_buffer_size = 3 * tile_size_bytes; // 3 tiles
+        constexpr uint32_t tile_size_bytes = 32 * 32 * 2;
+        constexpr uint32_t l1_buffer_size = 3 * tile_size_bytes;
         auto l1_buffer = allocate_buffer(l1_buffer_size, tt::tt_metal::BufferType::L1);
         
-        // Create TensorAccessorArgs for compile-time arguments (following loopback pattern)
         std::vector<uint32_t> compile_time_args;
-        TensorAccessorArgs(*src_buffer).append_to(compile_time_args);      // sparse buffer
-        TensorAccessorArgs(*dst_buffer).append_to(compile_time_args);      // dense buffer  
-        TensorAccessorArgs(*pattern_buffer).append_to(compile_time_args);  // pattern buffer
+        TensorAccessorArgs(*src_buffer).append_to(compile_time_args);
+        TensorAccessorArgs(*dst_buffer).append_to(compile_time_args);
+        TensorAccessorArgs(*pattern_buffer).append_to(compile_time_args);
         
-        // Create the single gather kernel (following loopback CreateKernel pattern)
         KernelHandle gather_kernel_id = CreateKernel(
             gather_program,
             "/storage/tt/tt-spatter/src/Spatter/kernels/gather_kernel.cpp",
@@ -376,33 +315,23 @@ bool TensTorrentDevice::executeGatherKernel(
             }
         );
         
-        std::cout << "DEBUG: Pattern length passed as: " << pattern_length << std::endl;
-        std::cout << "DEBUG: Total elements to process: " << num_elements << std::endl;
-        std::cout << "DEBUG: Count (iterations): " << (num_elements / pattern_length) << std::endl;
-        
-        // Set runtime arguments (following loopback SetRuntimeArgs pattern)
         const std::vector<uint32_t> runtime_args = {
-            l1_buffer->address(),        // arg0: l1_buffer_addr
-            src_buffer->address(),       // arg1: sparse_buffer_addr  
-            dst_buffer->address(),       // arg2: dense_buffer_addr
-            pattern_buffer->address(),   // arg3: pattern_buffer_addr
-            num_elements,                // arg4: num_elements (total elements to process)
-            delta,                       // arg5: delta
-            pattern_length               // arg6: pattern_length (for pattern reuse)
+            l1_buffer->address(),
+            num_elements,
+            delta,
+            pattern_length,
+            src_buffer->address(),
+            dst_buffer->address(),
+            pattern_buffer->address()
         };
         
         SetRuntimeArgs(gather_program, gather_kernel_id, core, runtime_args);
-        
-        std::cout << "DEBUG: Executing single gather kernel..." << std::endl;
-        // Execute the program (following loopback execution pattern)
         EnqueueProgram(*command_queue_, gather_program, false);
         Finish(*command_queue_);
         
-        std::cout << "Single gather kernel execution completed successfully!" << std::endl;
         return true;
         
     } catch (const std::exception& e) {
-        std::cerr << "TensTorrent gather kernel execution failed: " << e.what() << std::endl;
         return false;
     }
 }
@@ -414,38 +343,23 @@ bool TensTorrentDevice::executeScatterKernel(
     uint32_t num_elements,
     uint32_t delta) {
     
-    std::cout << "DEBUG: executeScatterKernel (single-kernel approach) called!" << std::endl;
-    
     if (!initialized_ || !src_buffer || !dst_buffer || !pattern_buffer) {
-        std::cout << "DEBUG: executeScatterKernel - initialization check failed!" << std::endl;
         return false;
     }
     
     try {
-        std::cout << "\n=== Single Scatter Kernel Execution ===" << std::endl;
-        std::cout << "Total elements to process: " << num_elements << std::endl;
-        std::cout << "Delta (stride): " << delta << std::endl;
-        std::cout << "Following loopback example pattern" << std::endl;
-        
-        // Start with single core like loopback example
         constexpr CoreCoord core = {0, 0};
-        std::cout << "Using single core (0,0) for initial implementation" << std::endl;
-        
-        // Create program (following loopback pattern exactly)
         Program scatter_program = CreateProgram();
         
-        // Allocate L1 buffer for temporary storage (3 tiles: pattern, dense, sparse)
-        constexpr uint32_t tile_size_bytes = 32 * 32 * 2; // BFloat16
-        constexpr uint32_t l1_buffer_size = 3 * tile_size_bytes; // 3 tiles
+        constexpr uint32_t tile_size_bytes = 32 * 32 * 2;
+        constexpr uint32_t l1_buffer_size = 3 * tile_size_bytes;
         auto l1_buffer = allocate_buffer(l1_buffer_size, tt::tt_metal::BufferType::L1);
         
-        // Create TensorAccessorArgs for compile-time arguments (following loopback pattern)
         std::vector<uint32_t> compile_time_args;
-        TensorAccessorArgs(*src_buffer).append_to(compile_time_args);      // dense buffer (source)
-        TensorAccessorArgs(*dst_buffer).append_to(compile_time_args);      // sparse buffer (destination)
-        TensorAccessorArgs(*pattern_buffer).append_to(compile_time_args);  // pattern buffer
+        TensorAccessorArgs(*src_buffer).append_to(compile_time_args);
+        TensorAccessorArgs(*dst_buffer).append_to(compile_time_args);
+        TensorAccessorArgs(*pattern_buffer).append_to(compile_time_args);
         
-        // Create the single scatter kernel (following loopback CreateKernel pattern)
         KernelHandle scatter_kernel_id = CreateKernel(
             scatter_program,
             "/storage/tt/tt-spatter/src/Spatter/kernels/scatter_kernel.cpp",
@@ -458,13 +372,14 @@ bool TensTorrentDevice::executeScatterKernel(
         );
         
         // Set runtime arguments (following loopback SetRuntimeArgs pattern)
+        // Pass L1 buffer, parameters, and buffer addresses (loopback passes addresses in runtime args)
         const std::vector<uint32_t> runtime_args = {
             l1_buffer->address(),        // arg0: l1_buffer_addr
-            src_buffer->address(),       // arg1: dense_buffer_addr (source)
-            dst_buffer->address(),       // arg2: sparse_buffer_addr (destination) 
-            pattern_buffer->address(),   // arg3: pattern_buffer_addr
-            num_elements,                // arg4: num_elements
-            delta                        // arg5: delta
+            num_elements,                // arg1: num_elements
+            delta,                       // arg2: delta
+            src_buffer->address(),       // arg3: dense_buffer_addr (source - actual DRAM address)
+            dst_buffer->address(),       // arg4: sparse_buffer_addr (destination - actual DRAM address)
+            pattern_buffer->address()    // arg5: pattern_buffer_addr (actual DRAM address)
         };
         
         SetRuntimeArgs(scatter_program, scatter_kernel_id, core, runtime_args);
@@ -501,14 +416,7 @@ size_t TensTorrentDevice::get_max_memory() const {
 }
 
 void TensTorrentDevice::compile_kernels() {
-    std::cout << "=== Single-Kernel Architecture Compilation ===" << std::endl;
-    std::cout << "Following loopback example pattern for pure data movement" << std::endl;
-    
-    // For single-kernel approach, we don't need to pre-compile anything
-    // Programs and kernels will be created on-demand with proper TensorAccessorArgs
-    // This matches the loopback example pattern exactly
-    
-    std::cout << "Single-kernel compilation setup completed" << std::endl;
+    // Single-kernel architecture - kernels compiled on-demand
 }
 
 // Method removed - using single-kernel approach following loopback pattern
