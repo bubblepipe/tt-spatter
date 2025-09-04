@@ -75,7 +75,7 @@ void kernel_main() {
     uint32_t* pattern_data = reinterpret_cast<uint32_t*>(pattern_l1_addr);
     uint16_t* dense_data = reinterpret_cast<uint16_t*>(dense_l1_addr);
     
-    // Process all elements, updating the dense buffer in place
+    // Process all elements, writing sequentially to dense buffer
     for (uint32_t i = 0; i < num_elements; i++) {
         // Calculate which pattern element to use (pattern reuse)
         uint32_t pattern_idx = i % pattern_length;
@@ -94,7 +94,8 @@ void kernel_main() {
         noc_async_read_barrier();
         
         uint16_t* sparse_data = reinterpret_cast<uint16_t*>(sparse_l1_addr);
-        dense_data[pattern_idx] = sparse_data[src_offset];
+        // FIX: Write to sequential position i, not pattern_idx
+        dense_data[i] = sparse_data[src_offset];
     }
     
     // Write the single dense tile back to DRAM

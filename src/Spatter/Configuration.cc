@@ -987,8 +987,6 @@ void Configuration<Spatter::TensTorrent>::setup() {
     };
     
     // Ensure data vectors are properly sized (like other backends)
-    std::cout << "DEBUG: Before resize - sparse.size()=" << sparse.size() << ", dense.size()=" << dense.size() << std::endl;
-    std::cout << "DEBUG: Required sizes - sparse_size=" << sparse_size << ", dense_size=" << dense_size << std::endl;
     
     if (sparse.size() < sparse_size) {
         sparse.resize(sparse_size);
@@ -1006,14 +1004,11 @@ void Configuration<Spatter::TensTorrent>::setup() {
         }
     }
     
-    std::cout << "DEBUG: After resize - sparse.size()=" << sparse.size() << ", dense.size()=" << dense.size() << std::endl;
     
     try {
         // Create buffers for pattern arrays (using size_t -> uint32_t conversion)
         if (!pattern.empty()) {
             size_t pattern_size_bytes = round_to_tiles(pattern.size() * sizeof(uint32_t));
-            std::cout << "DEBUG: Creating pattern buffer of size " << pattern_size_bytes 
-                      << " for " << pattern.size() << " elements" << std::endl;
             tt_pattern_buffer_ = tt_device_->allocate_buffer(pattern_size_bytes);
             if (!tt_pattern_buffer_) {
                 throw std::runtime_error("Failed to create pattern buffer");
@@ -1033,8 +1028,6 @@ void Configuration<Spatter::TensTorrent>::setup() {
         // Create buffers for data arrays (double -> BFloat16 conversion)
         if (!sparse.empty()) {
             size_t sparse_size_bytes = round_to_tiles(sparse.size() * 2); // BFloat16 = 2 bytes
-            std::cout << "DEBUG: Creating sparse buffer of size " << sparse_size_bytes 
-                      << " for " << sparse.size() << " elements" << std::endl;
             tt_sparse_buffer_ = tt_device_->allocate_buffer(sparse_size_bytes);
             if (!tt_sparse_buffer_) {
                 throw std::runtime_error("Failed to create sparse buffer");
@@ -1043,8 +1036,6 @@ void Configuration<Spatter::TensTorrent>::setup() {
         
         if (!dense.empty()) {
             size_t dense_size_bytes = round_to_tiles(dense.size() * 2); // BFloat16 = 2 bytes  
-            std::cout << "DEBUG: Creating dense buffer of size " << dense_size_bytes 
-                      << " for " << dense.size() << " elements" << std::endl;
             tt_dense_buffer_ = tt_device_->allocate_buffer(dense_size_bytes);
             if (!tt_dense_buffer_) {
                 throw std::runtime_error("Failed to create dense buffer");
@@ -1069,38 +1060,12 @@ void Configuration<Spatter::TensTorrent>::setup() {
         }
         
         if (tt_sparse_buffer_) {
-            std::cout << "DEBUG: Writing sparse buffer, first 5 values: ";
-            for (size_t i = 0; i < std::min(size_t(5), sparse.size()); ++i) {
-                std::cout << sparse[i] << " ";
-            }
-            std::cout << std::endl;
-            
-            // Also show values at indices 8-15 which should end up in dense
-            if (sparse.size() >= 16) {
-                std::cout << "DEBUG: Sparse values [8-15] (should end up in dense): ";
-                for (size_t i = 8; i < 16; ++i) {
-                    std::cout << sparse[i] << " ";
-                }
-                std::cout << std::endl;
-            }
             
             tt_device_->writeBuffer(tt_sparse_buffer_, sparse);
             
-            // Debug: Read back sparse buffer to verify write
-            constexpr bool DEBUG_VERIFY_WRITE = true;
-            if (DEBUG_VERIFY_WRITE) {
-                aligned_vector<double> verify_sparse;
-                tt_device_->readBuffer(tt_sparse_buffer_, verify_sparse, true);
-                std::cout << "DEBUG: Verified sparse[8-11] after write: ";
-                for (size_t i = 8; i < 12 && i < verify_sparse.size(); ++i) {
-                    std::cout << verify_sparse[i] << " ";
-                }
-                std::cout << std::endl;
-            }
         }
         
         if (tt_dense_buffer_) {
-            std::cout << "DEBUG: Writing initial dense buffer (will be overwritten by kernel)" << std::endl;
             // Initialize dense buffer with zeros for cleaner debugging
             for (size_t i = 0; i < dense.size(); ++i) {
                 dense[i] = 0.0;
@@ -1109,7 +1074,6 @@ void Configuration<Spatter::TensTorrent>::setup() {
         }
         
         // Ensure all buffer writes are complete before kernel execution
-        std::cout << "DEBUG: Syncing after buffer writes to ensure completion" << std::endl;
         tt_device_->sync();
         
     } catch (const std::exception& e) {
@@ -1141,6 +1105,48 @@ void Configuration<Spatter::TensTorrent>::gather(bool timed, unsigned long run_i
         if (kernel_result) {
             tt_device_->sync();
             tt_device_->readBuffer(tt_dense_buffer_, this->dense);
+            
+            // Print expected vs actual for validation
+            std::cout << "\n=== Gather Kernel Validation ===" << std::endl;
+            std::cout << "Expected first 5: ";
+            for (size_t i = 0; i < 5 && i < pattern_length * this->count; i++) {
+                size_t pattern_idx = i % pattern_length;
+                size_t iteration = i / pattern_length;
+                size_t src_idx = this->pattern[pattern_idx] + this->delta * iteration;
+                if (src_idx < sparse.size()) {
+                    std::cout << sparse[src_idx] << " ";
+                }
+            }
+            std::cout << std::endl;
+            
+            std::cout << "Actual first 5:   ";
+            for (size_t i = 0; i < 5 && i < dense.size(); i++) {
+                std::cout << dense[i] << " ";
+            }
+            std::cout << std::endl;
+            
+            // Check if values match (with BFloat16 tolerance)
+            bool validation_passed = true;
+            const double tolerance = 0.01; // BFloat16 precision tolerance
+            for (size_t i = 0; i < 5 && i < pattern_length * this->count; i++) {
+                size_t pattern_idx = i % pattern_length;
+                size_t iteration = i / pattern_length;
+                size_t src_idx = this->pattern[pattern_idx] + this->delta * iteration;
+                if (src_idx < sparse.size() && i < dense.size()) {
+                    double expected = sparse[src_idx];
+                    double actual = dense[i];
+                    if (std::abs(expected - actual) > tolerance) {
+                        validation_passed = false;
+                        break;
+                    }
+                }
+            }
+            
+            if (validation_passed) {
+                std::cout << "✓ Gather kernel validation PASSED" << std::endl;
+            } else {
+                std::cout << "✗ Gather kernel validation FAILED" << std::endl;
+            }
         }
         
     } catch (const std::exception& e) {

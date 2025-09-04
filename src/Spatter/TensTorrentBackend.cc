@@ -30,10 +30,6 @@ void TensTorrentDevice::discover_cores() {
     // Get the actual compute grid size from the device
     compute_grid_size_ = device_->compute_with_storage_grid_size();
     
-    std::cout << "=== TensTorrent Core Configuration Debug ===" << std::endl;
-    std::cout << "Device compute grid size: " << compute_grid_size_.x << "x" << compute_grid_size_.y 
-              << " (" << (compute_grid_size_.x * compute_grid_size_.y) << " total cores)" << std::endl;
-    std::cout << "User requested cores (--tt-cores): " << num_cores_ << std::endl;
     
     // Calculate effective grid size based on user's request
     uint32_t total_device_cores = compute_grid_size_.x * compute_grid_size_.y;
@@ -43,7 +39,6 @@ void TensTorrentDevice::discover_cores() {
         // Use all cores if user didn't specify or specified 0/negative
         effective_cores = total_device_cores;
         effective_grid_size_ = compute_grid_size_;
-        std::cout << "Using all available cores (default behavior)" << std::endl;
     } else {
         // Limit to user's requested number
         effective_cores = std::min(static_cast<uint32_t>(num_cores_), total_device_cores);
@@ -59,18 +54,13 @@ void TensTorrentDevice::discover_cores() {
         effective_cores = std::min(effective_x * effective_y, total_device_cores);
         effective_grid_size_ = CoreCoord{effective_x, effective_y};
         
-        std::cout << "Limiting to " << effective_cores << " cores as requested by user" << std::endl;
     }
     
-    std::cout << "Effective grid size: " << effective_grid_size_.x << "x" << effective_grid_size_.y 
-              << " (" << (effective_grid_size_.x * effective_grid_size_.y) << " cores)" << std::endl;
-    std::cout << "=============================================" << std::endl;
     
     // For now, we'll use the split_work_to_cores approach directly in the kernel execution
     // The active_cores_ vector will be populated by split_work_to_cores when we execute kernels
     // This allows for optimal work distribution based on the actual workload size
     
-    std::cout << "Multi-core discovery completed. Cores will be allocated dynamically based on workload." << std::endl;
 }
 
 bool TensTorrentDevice::initialize() {
@@ -115,24 +105,18 @@ std::shared_ptr<tt::tt_metal::Buffer> TensTorrentDevice::allocate_buffer(size_t 
     }
     
     // Debug: Print original size
-    std::cout << "DEBUG: allocate_buffer - original size_bytes: " << size_bytes << std::endl;
     
     // Align size to proper boundaries
     size_t aligned_size = align_to_tile_size(size_bytes);
-    std::cout << "DEBUG: allocate_buffer - after tile alignment: " << aligned_size << std::endl;
     
     if (type == tt::tt_metal::BufferType::DRAM) {
         // Blackhole requires 64B alignment for DRAM
         size_t before_dram = aligned_size;
         aligned_size = ((aligned_size + DRAM_ALIGNMENT - 1) / DRAM_ALIGNMENT) * DRAM_ALIGNMENT;
-        std::cout << "DEBUG: allocate_buffer - after DRAM alignment: " << aligned_size 
-                  << " (was " << before_dram << ")" << std::endl;
     }
     
     // Check if this is a potentially problematic size
     bool is_power_of_2 = (aligned_size & (aligned_size - 1)) == 0;
-    std::cout << "DEBUG: allocate_buffer - is power of 2: " << is_power_of_2 
-              << ", size in KB: " << (aligned_size / 1024) << std::endl;
     
     InterleavedBufferConfig config{
         .device = device_,
@@ -141,13 +125,9 @@ std::shared_ptr<tt::tt_metal::Buffer> TensTorrentDevice::allocate_buffer(size_t 
         .buffer_type = type
     };
     
-    std::cout << "DEBUG: allocate_buffer - page_size: " << config.page_size 
-              << ", num pages: " << (aligned_size / config.page_size) << std::endl;
     
     try {
         auto buffer = CreateBuffer(config);
-        std::cout << "DEBUG: allocate_buffer - CreateBuffer succeeded, address: " 
-                  << std::hex << buffer->address() << std::dec << std::endl;
         return buffer;
     } catch (const std::exception& e) {
         std::cerr << "ERROR: CreateBuffer failed with size " << aligned_size 
@@ -384,12 +364,10 @@ bool TensTorrentDevice::executeScatterKernel(
         
         SetRuntimeArgs(scatter_program, scatter_kernel_id, core, runtime_args);
         
-        std::cout << "DEBUG: Executing single scatter kernel..." << std::endl;
         // Execute the program (following loopback execution pattern)
         EnqueueProgram(*command_queue_, scatter_program, false);
         Finish(*command_queue_);
         
-        std::cout << "Single scatter kernel execution completed successfully!" << std::endl;
         return true;
         
     } catch (const std::exception& e) {
