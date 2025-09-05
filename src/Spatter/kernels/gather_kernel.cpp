@@ -11,24 +11,28 @@
  * Implements: dense[i] = sparse[pattern[i % pattern_length] + delta * (i / pattern_length)]
  * 
  * Runtime Args:
- * - arg0: l1_buffer_addr - L1 temporary buffer address
- * - arg1: num_elements - Total number of elements to gather
- * - arg2: delta - Stride between pattern iterations
- * - arg3: pattern_length - Length of the pattern array
- * - arg4: sparse_addr - Source buffer address (DRAM)
- * - arg5: dense_addr - Destination buffer address (DRAM)
- * - arg6: pattern_addr - Pattern buffer address (DRAM)
+ * - arg0: pattern_l1_addr - Pattern L1 buffer address
+ * - arg1: sparse_l1_addr - Sparse L1 buffer address
+ * - arg2: dense_l1_addr - Dense L1 buffer address
+ * - arg3: num_elements - Total number of elements to gather
+ * - arg4: delta - Stride between pattern iterations
+ * - arg5: pattern_length - Length of the pattern array
+ * - arg6: sparse_addr - Source buffer address (DRAM)
+ * - arg7: dense_addr - Destination buffer address (DRAM)
+ * - arg8: pattern_addr - Pattern buffer address (DRAM)
  */
 
 void kernel_main() {
-    // Read runtime arguments
-    uint32_t l1_buffer_addr = get_arg_val<uint32_t>(0);
-    uint32_t num_elements = get_arg_val<uint32_t>(1);
-    uint32_t delta = get_arg_val<uint32_t>(2);
-    uint32_t pattern_length = get_arg_val<uint32_t>(3);
-    uint32_t sparse_addr = get_arg_val<uint32_t>(4);
-    uint32_t dense_addr = get_arg_val<uint32_t>(5);
-    uint32_t pattern_addr = get_arg_val<uint32_t>(6);
+    // Read runtime arguments - three separate L1 buffers
+    uint32_t pattern_l1_addr = get_arg_val<uint32_t>(0);
+    uint32_t sparse_l1_addr = get_arg_val<uint32_t>(1);
+    uint32_t dense_l1_addr = get_arg_val<uint32_t>(2);
+    uint32_t num_elements = get_arg_val<uint32_t>(3);
+    uint32_t delta = get_arg_val<uint32_t>(4);
+    uint32_t pattern_length = get_arg_val<uint32_t>(5);
+    uint32_t sparse_addr = get_arg_val<uint32_t>(6);
+    uint32_t dense_addr = get_arg_val<uint32_t>(7);
+    uint32_t pattern_addr = get_arg_val<uint32_t>(8);
 
     // Tile constants
     const uint32_t tile_size_bytes = 32 * 32 * 2;  // 2048 bytes per tile
@@ -43,11 +47,6 @@ void kernel_main() {
     
     constexpr auto pattern_args = TensorAccessorArgs<dense_args.next_compile_time_args_offset()>();
     const auto pattern_accessor = TensorAccessor(pattern_args, pattern_addr, tile_size_bytes);
-
-    // L1 memory layout for 3 tiles: pattern, sparse, dense
-    uint32_t pattern_l1_addr = l1_buffer_addr;
-    uint32_t sparse_l1_addr = l1_buffer_addr + tile_size_bytes;
-    uint32_t dense_l1_addr = l1_buffer_addr + 2 * tile_size_bytes;
     
     // Load pattern tile once (it will be reused)
     // Pattern is stored as uint32_t values
@@ -72,7 +71,7 @@ void kernel_main() {
         }
         
         // Clear the dense output tile in L1
-        uint16_t* dense_data = reinterpret_cast<uint16_t*>(dense_addr);
+        uint16_t* dense_data = reinterpret_cast<uint16_t*>(dense_l1_addr);
         for (uint32_t i = 0; i < elements_per_tile; i++) {
             dense_data[i] = 0;
         }
@@ -92,19 +91,19 @@ void kernel_main() {
             
             // Load the sparse tile if not already loaded
             if (src_tile_idx != last_sparse_tile) {
-                noc_async_read_tile(src_tile_idx, sparse_accessor, sparse_addr);
+                noc_async_read_tile(src_tile_idx, sparse_accessor, sparse_l1_addr);
                 noc_async_read_barrier();
                 last_sparse_tile = src_tile_idx;
             }
             
             // Copy the element from sparse L1 to dense L1
-            uint16_t* sparse_data = reinterpret_cast<uint16_t*>(sparse_addr);
+            uint16_t* sparse_data = reinterpret_cast<uint16_t*>(sparse_l1_addr);
             uint32_t dense_offset = elem_idx - tile_start;
             dense_data[dense_offset] = sparse_data[src_elem_offset];
         }
         
         // Write the completed output tile from L1 back to DRAM
-        noc_async_write_tile(out_tile_idx, dense_accessor, dense_addr);
+        noc_async_write_tile(out_tile_idx, dense_accessor, dense_l1_addr);
         noc_async_write_barrier();
     }
     

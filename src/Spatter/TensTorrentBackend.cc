@@ -275,9 +275,36 @@ bool TensTorrentDevice::executeGatherKernel(
         constexpr CoreCoord core = {0, 0};
         Program gather_program = CreateProgram();
         
-        constexpr uint32_t tile_size_bytes = 32 * 32 * 2;
-        constexpr uint32_t l1_buffer_size = 3 * tile_size_bytes;
-        auto l1_buffer = allocate_buffer(l1_buffer_size, tt::tt_metal::BufferType::L1);
+        // Tile size constants
+        constexpr uint32_t tile_size_bytes = 32 * 32 * 2;  // 2048 bytes per tile
+        
+        // Create three separate L1 buffers for pattern, sparse, and dense tiles
+        // Following the pattern from loopback example
+        InterleavedBufferConfig l1_pattern_config{
+            .device = device_,
+            .size = tile_size_bytes,
+            .page_size = tile_size_bytes,
+            .buffer_type = tt::tt_metal::BufferType::L1
+        };
+        
+        InterleavedBufferConfig l1_sparse_config{
+            .device = device_,
+            .size = tile_size_bytes,
+            .page_size = tile_size_bytes,
+            .buffer_type = tt::tt_metal::BufferType::L1
+        };
+        
+        InterleavedBufferConfig l1_dense_config{
+            .device = device_,
+            .size = tile_size_bytes,
+            .page_size = tile_size_bytes,
+            .buffer_type = tt::tt_metal::BufferType::L1
+        };
+        
+        // Allocate the L1 buffers
+        auto l1_pattern_buffer = CreateBuffer(l1_pattern_config);
+        auto l1_sparse_buffer = CreateBuffer(l1_sparse_config);
+        auto l1_dense_buffer = CreateBuffer(l1_dense_config);
         
         std::vector<uint32_t> compile_time_args;
         TensorAccessorArgs(*src_buffer).append_to(compile_time_args);
@@ -296,13 +323,15 @@ bool TensTorrentDevice::executeGatherKernel(
         );
         
         const std::vector<uint32_t> runtime_args = {
-            l1_buffer->address(),
-            num_elements,
-            delta,
-            pattern_length,
-            src_buffer->address(),
-            dst_buffer->address(),
-            pattern_buffer->address()
+            l1_pattern_buffer->address(),    // arg0: pattern L1 buffer
+            l1_sparse_buffer->address(),     // arg1: sparse L1 buffer
+            l1_dense_buffer->address(),      // arg2: dense L1 buffer
+            num_elements,                    // arg3: number of elements
+            delta,                           // arg4: delta
+            pattern_length,                  // arg5: pattern length
+            src_buffer->address(),           // arg6: sparse DRAM buffer
+            dst_buffer->address(),           // arg7: dense DRAM buffer
+            pattern_buffer->address()        // arg8: pattern DRAM buffer
         };
         
         SetRuntimeArgs(gather_program, gather_kernel_id, core, runtime_args);
