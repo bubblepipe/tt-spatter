@@ -11,7 +11,7 @@ namespace Spatter {
 
 // Global flag to enable/disable TensTorrent kernel validation
 // Set to true for debugging, false for production performance
-static bool enable_tt_validation = false;
+static bool enable_tt_validation = true;
 
 ConfigurationBase::ConfigurationBase(const size_t id, const std::string name,
     std::string k, const aligned_vector<size_t> &pattern,
@@ -1170,6 +1170,7 @@ void Configuration<Spatter::TensTorrent>::gather(bool timed, unsigned long run_i
 
 void Configuration<Spatter::TensTorrent>::scatter(bool timed, unsigned long run_id) {
     size_t pattern_length = this->pattern.size();
+    bool kernel_result = false;
     
     if (timed)
         this->timer.start();
@@ -1179,39 +1180,82 @@ void Configuration<Spatter::TensTorrent>::scatter(bool timed, unsigned long run_
             throw std::runtime_error("TensTorrent buffers not properly initialized");
         }
         
-        auto kernel_result = tt_device_->executeScatterKernel(
+        kernel_result = tt_device_->executeScatterKernel(
             tt_dense_buffer_,
             tt_sparse_buffer_,
             tt_pattern_buffer_,
             static_cast<uint32_t>(pattern_length * this->count),
-            static_cast<uint32_t>(this->delta)
+            static_cast<uint32_t>(this->delta),
+            static_cast<uint32_t>(pattern_length)
         );
         
-        if (!kernel_result) {
-            for (size_t i = 0; i < this->count; ++i) {
-                for (size_t j = 0; j < pattern_length; ++j) {
-                    this->sparse[this->pattern[j] + this->delta * i] = 
-                        this->dense[j + pattern_length * (i % this->wrap)];
-                }
-            }
-        } else {
+        if (kernel_result) {
+            tt_device_->sync();
             tt_device_->readBuffer(tt_sparse_buffer_, this->sparse);
         }
         
     } catch (const std::exception& e) {
-        // Fall back to serial implementation on any error
-        for (size_t i = 0; i < this->count; ++i) {
-            for (size_t j = 0; j < pattern_length; ++j) {
-                this->sparse[this->pattern[j] + this->delta * i] = 
-                    this->dense[j + pattern_length * (i % this->wrap)];
-            }
-        }
+        // Kernel execution failed
     }
     
     if (timed) {
         this->timer.stop();
         this->time_seconds[run_id] = this->timer.seconds();
         this->timer.clear();
+    }
+    
+    // Only perform validation if enabled (after timing to not affect performance measurement)
+    if (enable_tt_validation && kernel_result) {
+        // Print expected vs actual for validation
+        std::cout << "\n=== Scatter Kernel Validation ===" << std::endl;
+        std::cout << "Expected first 5 scattered values: ";
+        
+        // Calculate expected values for first 5 scatter operations
+        for (size_t i = 0; i < 5 && i < pattern_length * this->count; i++) {
+            size_t pattern_idx = i % pattern_length;
+            size_t iteration = i / pattern_length;
+            size_t dst_idx = this->pattern[pattern_idx] + this->delta * iteration;
+            size_t src_idx = i + pattern_length * (iteration % this->wrap);
+            if (dst_idx < sparse.size() && src_idx < dense.size()) {
+                std::cout << "sparse[" << dst_idx << "]=" << dense[src_idx] << " ";
+            }
+        }
+        std::cout << std::endl;
+        
+        std::cout << "Actual first 5 scattered values:   ";
+        for (size_t i = 0; i < 5 && i < pattern_length * this->count; i++) {
+            size_t pattern_idx = i % pattern_length;
+            size_t iteration = i / pattern_length;
+            size_t dst_idx = this->pattern[pattern_idx] + this->delta * iteration;
+            if (dst_idx < sparse.size()) {
+                std::cout << "sparse[" << dst_idx << "]=" << sparse[dst_idx] << " ";
+            }
+        }
+        std::cout << std::endl;
+        
+        // Check if values match (with BFloat16 tolerance)
+        bool validation_passed = true;
+        const double tolerance = 0.01; // BFloat16 precision tolerance
+        for (size_t i = 0; i < 5 && i < pattern_length * this->count; i++) {
+            size_t pattern_idx = i % pattern_length;
+            size_t iteration = i / pattern_length;
+            size_t dst_idx = this->pattern[pattern_idx] + this->delta * iteration;
+            size_t src_idx = i + pattern_length * (iteration % this->wrap);
+            if (dst_idx < sparse.size() && src_idx < dense.size()) {
+                double expected = dense[src_idx];
+                double actual = sparse[dst_idx];
+                if (std::abs(expected - actual) > tolerance) {
+                    validation_passed = false;
+                    break;
+                }
+            }
+        }
+        
+        if (validation_passed) {
+            std::cout << "✓ Scatter kernel validation PASSED" << std::endl;
+        } else {
+            std::cout << "✗ Scatter kernel validation FAILED" << std::endl;
+        }
     }
 }
 

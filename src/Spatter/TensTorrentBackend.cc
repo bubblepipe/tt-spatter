@@ -350,7 +350,8 @@ bool TensTorrentDevice::executeScatterKernel(
     std::shared_ptr<tt::tt_metal::Buffer> dst_buffer,
     std::shared_ptr<tt::tt_metal::Buffer> pattern_buffer,
     uint32_t num_elements,
-    uint32_t delta) {
+    uint32_t delta,
+    uint32_t pattern_length) {
     
     if (!initialized_ || !src_buffer || !dst_buffer || !pattern_buffer) {
         return false;
@@ -360,9 +361,36 @@ bool TensTorrentDevice::executeScatterKernel(
         constexpr CoreCoord core = {0, 0};
         Program scatter_program = CreateProgram();
         
-        constexpr uint32_t tile_size_bytes = 32 * 32 * 2;
-        constexpr uint32_t l1_buffer_size = 3 * tile_size_bytes;
-        auto l1_buffer = allocate_buffer(l1_buffer_size, tt::tt_metal::BufferType::L1);
+        // Tile size constants
+        constexpr uint32_t tile_size_bytes = 32 * 32 * 2;  // 2048 bytes per tile
+        
+        // Create three separate L1 buffers for pattern, dense, and sparse tiles
+        // Following the same pattern as gather kernel
+        InterleavedBufferConfig l1_pattern_config{
+            .device = device_,
+            .size = tile_size_bytes,
+            .page_size = tile_size_bytes,
+            .buffer_type = tt::tt_metal::BufferType::L1
+        };
+        
+        InterleavedBufferConfig l1_dense_config{
+            .device = device_,
+            .size = tile_size_bytes,
+            .page_size = tile_size_bytes,
+            .buffer_type = tt::tt_metal::BufferType::L1
+        };
+        
+        InterleavedBufferConfig l1_sparse_config{
+            .device = device_,
+            .size = tile_size_bytes,
+            .page_size = tile_size_bytes,
+            .buffer_type = tt::tt_metal::BufferType::L1
+        };
+        
+        // Allocate the L1 buffers
+        auto l1_pattern_buffer = CreateBuffer(l1_pattern_config);
+        auto l1_dense_buffer = CreateBuffer(l1_dense_config);
+        auto l1_sparse_buffer = CreateBuffer(l1_sparse_config);
         
         std::vector<uint32_t> compile_time_args;
         TensorAccessorArgs(*src_buffer).append_to(compile_time_args);
@@ -380,20 +408,20 @@ bool TensTorrentDevice::executeScatterKernel(
             }
         );
         
-        // Set runtime arguments (following loopback SetRuntimeArgs pattern)
-        // Pass L1 buffer, parameters, and buffer addresses (loopback passes addresses in runtime args)
+        // Runtime arguments matching gather kernel structure (9 args)
         const std::vector<uint32_t> runtime_args = {
-            l1_buffer->address(),        // arg0: l1_buffer_addr
-            num_elements,                // arg1: num_elements
-            delta,                       // arg2: delta
-            src_buffer->address(),       // arg3: dense_buffer_addr (source - actual DRAM address)
-            dst_buffer->address(),       // arg4: sparse_buffer_addr (destination - actual DRAM address)
-            pattern_buffer->address()    // arg5: pattern_buffer_addr (actual DRAM address)
+            l1_pattern_buffer->address(),   // arg0: pattern L1 buffer
+            l1_dense_buffer->address(),     // arg1: dense L1 buffer (source)
+            l1_sparse_buffer->address(),    // arg2: sparse L1 buffer (destination)
+            num_elements,                   // arg3: number of elements
+            delta,                          // arg4: delta
+            pattern_length,                 // arg5: pattern length
+            src_buffer->address(),          // arg6: dense DRAM buffer (source)
+            dst_buffer->address(),          // arg7: sparse DRAM buffer (destination)
+            pattern_buffer->address()       // arg8: pattern DRAM buffer
         };
         
         SetRuntimeArgs(scatter_program, scatter_kernel_id, core, runtime_args);
-        
-        // Execute the program (following loopback execution pattern)
         EnqueueProgram(*command_queue_, scatter_program, false);
         Finish(*command_queue_);
         
