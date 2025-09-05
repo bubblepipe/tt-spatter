@@ -9,6 +9,10 @@
 
 namespace Spatter {
 
+// Global flag to enable/disable TensTorrent kernel validation
+// Set to true for debugging, false for production performance
+static bool enable_tt_validation = false;
+
 ConfigurationBase::ConfigurationBase(const size_t id, const std::string name,
     std::string k, const aligned_vector<size_t> &pattern,
     const aligned_vector<size_t> &pattern_gather,
@@ -1083,6 +1087,7 @@ void Configuration<Spatter::TensTorrent>::setup() {
 
 void Configuration<Spatter::TensTorrent>::gather(bool timed, unsigned long run_id) {
     size_t pattern_length = this->pattern.size();
+    bool kernel_result = false;
     
     if (timed) {
         this->timer.start();
@@ -1093,7 +1098,7 @@ void Configuration<Spatter::TensTorrent>::gather(bool timed, unsigned long run_i
             throw std::runtime_error("TensTorrent buffers not properly initialized");
         }
         
-        auto kernel_result = tt_device_->executeGatherKernel(
+        kernel_result = tt_device_->executeGatherKernel(
             tt_sparse_buffer_,
             tt_dense_buffer_,
             tt_pattern_buffer_,
@@ -1105,48 +1110,6 @@ void Configuration<Spatter::TensTorrent>::gather(bool timed, unsigned long run_i
         if (kernel_result) {
             tt_device_->sync();
             tt_device_->readBuffer(tt_dense_buffer_, this->dense);
-            
-            // Print expected vs actual for validation
-            std::cout << "\n=== Gather Kernel Validation ===" << std::endl;
-            std::cout << "Expected first 5: ";
-            for (size_t i = 0; i < 5 && i < pattern_length * this->count; i++) {
-                size_t pattern_idx = i % pattern_length;
-                size_t iteration = i / pattern_length;
-                size_t src_idx = this->pattern[pattern_idx] + this->delta * iteration;
-                if (src_idx < sparse.size()) {
-                    std::cout << sparse[src_idx] << " ";
-                }
-            }
-            std::cout << std::endl;
-            
-            std::cout << "Actual first 5:   ";
-            for (size_t i = 0; i < 5 && i < dense.size(); i++) {
-                std::cout << dense[i] << " ";
-            }
-            std::cout << std::endl;
-            
-            // Check if values match (with BFloat16 tolerance)
-            bool validation_passed = true;
-            const double tolerance = 0.01; // BFloat16 precision tolerance
-            for (size_t i = 0; i < 5 && i < pattern_length * this->count; i++) {
-                size_t pattern_idx = i % pattern_length;
-                size_t iteration = i / pattern_length;
-                size_t src_idx = this->pattern[pattern_idx] + this->delta * iteration;
-                if (src_idx < sparse.size() && i < dense.size()) {
-                    double expected = sparse[src_idx];
-                    double actual = dense[i];
-                    if (std::abs(expected - actual) > tolerance) {
-                        validation_passed = false;
-                        break;
-                    }
-                }
-            }
-            
-            if (validation_passed) {
-                std::cout << "✓ Gather kernel validation PASSED" << std::endl;
-            } else {
-                std::cout << "✗ Gather kernel validation FAILED" << std::endl;
-            }
         }
         
     } catch (const std::exception& e) {
@@ -1157,6 +1120,51 @@ void Configuration<Spatter::TensTorrent>::gather(bool timed, unsigned long run_i
         this->timer.stop();
         this->time_seconds[run_id] = this->timer.seconds();
         this->timer.clear();
+    }
+    
+    // Only perform validation if enabled (after timing to not affect performance measurement)
+    if (enable_tt_validation && kernel_result) {
+        // Print expected vs actual for validation
+        std::cout << "\n=== Gather Kernel Validation ===" << std::endl;
+        std::cout << "Expected first 5: ";
+        for (size_t i = 0; i < 5 && i < pattern_length * this->count; i++) {
+            size_t pattern_idx = i % pattern_length;
+            size_t iteration = i / pattern_length;
+            size_t src_idx = this->pattern[pattern_idx] + this->delta * iteration;
+            if (src_idx < sparse.size()) {
+                std::cout << sparse[src_idx] << " ";
+            }
+        }
+        std::cout << std::endl;
+        
+        std::cout << "Actual first 5:   ";
+        for (size_t i = 0; i < 5 && i < dense.size(); i++) {
+            std::cout << dense[i] << " ";
+        }
+        std::cout << std::endl;
+        
+        // Check if values match (with BFloat16 tolerance)
+        bool validation_passed = true;
+        const double tolerance = 0.01; // BFloat16 precision tolerance
+        for (size_t i = 0; i < 5 && i < pattern_length * this->count; i++) {
+            size_t pattern_idx = i % pattern_length;
+            size_t iteration = i / pattern_length;
+            size_t src_idx = this->pattern[pattern_idx] + this->delta * iteration;
+            if (src_idx < sparse.size() && i < dense.size()) {
+                double expected = sparse[src_idx];
+                double actual = dense[i];
+                if (std::abs(expected - actual) > tolerance) {
+                    validation_passed = false;
+                    break;
+                }
+            }
+        }
+        
+        if (validation_passed) {
+            std::cout << "✓ Gather kernel validation PASSED" << std::endl;
+        } else {
+            std::cout << "✗ Gather kernel validation FAILED" << std::endl;
+        }
     }
 }
 
