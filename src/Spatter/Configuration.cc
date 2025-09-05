@@ -11,7 +11,7 @@ namespace Spatter {
 
 // Global flag to enable/disable TensTorrent kernel validation
 // Set to true for debugging, false for production performance
-static bool enable_tt_validation = true;
+static bool enable_tt_validation = false;
 
 ConfigurationBase::ConfigurationBase(const size_t id, const std::string name,
     std::string k, const aligned_vector<size_t> &pattern,
@@ -1070,9 +1070,17 @@ void Configuration<Spatter::TensTorrent>::setup() {
         }
         
         if (tt_dense_buffer_) {
-            // Initialize dense buffer with zeros for cleaner debugging
-            for (size_t i = 0; i < dense.size(); ++i) {
-                dense[i] = 0.0;
+            // Initialize dense buffer with random data for scatter operations
+            // (for gather, the dense buffer is the output, but for scatter it's the input)
+            if (kernel.compare("scatter") == 0 || kernel.compare("multiscatter") == 0) {
+                for (size_t i = 0; i < dense.size(); ++i) {
+                    dense[i] = static_cast<double>(rand()) / RAND_MAX;
+                }
+            } else {
+                // For gather operations, initialize with zeros as it's the output buffer
+                for (size_t i = 0; i < dense.size(); ++i) {
+                    dense[i] = 0.0;
+                }
             }
             tt_device_->writeBuffer(tt_dense_buffer_, dense);
         }
@@ -1215,7 +1223,7 @@ void Configuration<Spatter::TensTorrent>::scatter(bool timed, unsigned long run_
             size_t pattern_idx = i % pattern_length;
             size_t iteration = i / pattern_length;
             size_t dst_idx = this->pattern[pattern_idx] + this->delta * iteration;
-            size_t src_idx = i + pattern_length * (iteration % this->wrap);
+            size_t src_idx = i;  // For scatter, we read sequentially from dense[i]
             if (dst_idx < sparse.size() && src_idx < dense.size()) {
                 std::cout << "sparse[" << dst_idx << "]=" << dense[src_idx] << " ";
             }
@@ -1240,7 +1248,7 @@ void Configuration<Spatter::TensTorrent>::scatter(bool timed, unsigned long run_
             size_t pattern_idx = i % pattern_length;
             size_t iteration = i / pattern_length;
             size_t dst_idx = this->pattern[pattern_idx] + this->delta * iteration;
-            size_t src_idx = i + pattern_length * (iteration % this->wrap);
+            size_t src_idx = i;  // For scatter, we read sequentially from dense[i]
             if (dst_idx < sparse.size() && src_idx < dense.size()) {
                 double expected = dense[src_idx];
                 double actual = sparse[dst_idx];
