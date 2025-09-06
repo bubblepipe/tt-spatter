@@ -405,8 +405,8 @@ bool TensTorrentDevice::executeScatterKernel(
         // Tile size constants
         constexpr uint32_t tile_size_bytes = 32 * 32 * 2;  // 2048 bytes per tile
         
-        // Get the compute grid size
-        auto core_grid = device_->compute_with_storage_grid_size();
+        // Use the effective grid size based on --tt-cores parameter
+        auto core_grid = effective_grid_size_;
         
         // Split work across cores
         constexpr bool row_major = true;
@@ -415,7 +415,7 @@ bool TensTorrentDevice::executeScatterKernel(
             split_work_to_cores(core_grid, num_elements, row_major);
         
         // Debug output for multi-core analysis
-        std::cout << "[TensTorrent Gather] Multi-core debug info:" << std::endl;
+        std::cout << "[TensTorrent Scatter] Multi-core debug info:" << std::endl;
         std::cout << "  - Requested cores (--tt-cores): " << num_cores_ << std::endl;
         std::cout << "  - Device grid size: " << compute_grid_size_.x << "x" << compute_grid_size_.y 
                   << " = " << (compute_grid_size_.x * compute_grid_size_.y) << " cores" << std::endl;
