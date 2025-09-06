@@ -6,7 +6,7 @@
 #include "dataflow_api.h"
 
 /*
- * Scatter Kernel for Spatter TensTorrent Backend
+ * Scatter Kernel for Spatter TensTorrent Backend (Multi-Core)
  * 
  * Implements: sparse[pattern[j % pattern_length] + delta * (j / pattern_length)] = dense[j]
  * 
@@ -14,12 +14,13 @@
  * - arg0: pattern_l1_addr - Pattern L1 buffer address
  * - arg1: dense_l1_addr - Dense L1 buffer address (source)
  * - arg2: sparse_l1_addr - Sparse L1 buffer address (destination)
- * - arg3: num_elements - Total number of elements to scatter
- * - arg4: delta - Stride between pattern iterations
- * - arg5: pattern_length - Length of the pattern array
- * - arg6: dense_addr - Source buffer address (DRAM)
- * - arg7: sparse_addr - Destination buffer address (DRAM)
- * - arg8: pattern_addr - Pattern buffer address (DRAM)
+ * - arg3: start_element - Starting element index for this core
+ * - arg4: num_elements_per_core - Number of elements this core should process
+ * - arg5: delta - Stride between pattern iterations
+ * - arg6: pattern_length - Length of the pattern array
+ * - arg7: dense_addr - Source buffer address (DRAM)
+ * - arg8: sparse_addr - Destination buffer address (DRAM)
+ * - arg9: pattern_addr - Pattern buffer address (DRAM)
  */
 
 void kernel_main() {
@@ -27,12 +28,13 @@ void kernel_main() {
     uint32_t pattern_l1_addr = get_arg_val<uint32_t>(0);
     uint32_t dense_l1_addr = get_arg_val<uint32_t>(1);
     uint32_t sparse_l1_addr = get_arg_val<uint32_t>(2);
-    uint32_t num_elements = get_arg_val<uint32_t>(3);
-    uint32_t delta = get_arg_val<uint32_t>(4);
-    uint32_t pattern_length = get_arg_val<uint32_t>(5);
-    uint32_t dense_addr = get_arg_val<uint32_t>(6);
-    uint32_t sparse_addr = get_arg_val<uint32_t>(7);
-    uint32_t pattern_addr = get_arg_val<uint32_t>(8);
+    uint32_t start_element = get_arg_val<uint32_t>(3);
+    uint32_t num_elements_per_core = get_arg_val<uint32_t>(4);
+    uint32_t delta = get_arg_val<uint32_t>(5);
+    uint32_t pattern_length = get_arg_val<uint32_t>(6);
+    uint32_t dense_addr = get_arg_val<uint32_t>(7);
+    uint32_t sparse_addr = get_arg_val<uint32_t>(8);
+    uint32_t pattern_addr = get_arg_val<uint32_t>(9);
 
     // Tile constants
     const uint32_t tile_size_bytes = 32 * 32 * 2;  // 2048 bytes per tile
@@ -56,18 +58,27 @@ void kernel_main() {
     // Get pointer to pattern data in L1
     uint32_t* pattern_data = reinterpret_cast<uint32_t*>(pattern_l1_addr);
 
-    // Process input in tiles
-    uint32_t num_input_tiles = (num_elements + elements_per_tile - 1) / elements_per_tile;
+    // Calculate the end element for this core
+    uint32_t end_element = start_element + num_elements_per_core;
+    
+    // Process input in tiles for this core's range
+    uint32_t start_tile = start_element / elements_per_tile;
+    uint32_t end_tile = (end_element + elements_per_tile - 1) / elements_per_tile;
     
     // Track the last loaded sparse tile to avoid redundant loads
     uint32_t last_sparse_tile = UINT32_MAX;
     
-    for (uint32_t in_tile_idx = 0; in_tile_idx < num_input_tiles; in_tile_idx++) {
+    for (uint32_t in_tile_idx = start_tile; in_tile_idx < end_tile; in_tile_idx++) {
         // Calculate the range of elements for this input tile
         uint32_t tile_start = in_tile_idx * elements_per_tile;
         uint32_t tile_end = tile_start + elements_per_tile;
-        if (tile_end > num_elements) {
-            tile_end = num_elements;
+        
+        // Clip to this core's assigned range
+        if (tile_start < start_element) {
+            tile_start = start_element;
+        }
+        if (tile_end > end_element) {
+            tile_end = end_element;
         }
         
         // Read the dense input tile from DRAM to L1
