@@ -1,0 +1,34 @@
+CompileFlags:
+  CompilationDatabase: build_tt/
+  Add:
+    - -I/storage/tt/tt-metal/tt_metal/hw/inc
+    - -I/storage/tt/tt-metal/tt_metal/hw/inc/accessor
+    - -I/storage/tt/tt-metal/tt_metal/hw/inc/blackhole
+    - -I/storage/tt/tt-metal/tt_metal/hw/inc/blackhole/noc
+    - -I/storage/tt/tt-metal/tt_metal/include
+    - -I/storage/tt/tt-metal/tt_metal/hw/ckernels/blackhole/metal/common
+    - -I/storage/tt/tt-metal/tt_metal/hw/ckernels/blackhole/metal/llk_api
+    - -DKERNEL
+    - -DDATAFLOW_KERNEL
+    - -DBLACKHOLE
+    - -std=c++17
+    - -Wno-return-type
+    - -Wno-inconsistent-missing-override
+    - -Wno-error
+
+Diagnostics:
+  UnusedIncludes: None
+  MissingIncludes: None
+  Suppress:
+    - "undeclared_var_use"
+    - "pp_file_not_found"
+    - "typecheck_missing_return_type_incompatible"
+    # - "*"
+  
+Index:
+  Background: Build
+
+InlayHints:
+  Enabled: true
+  ParameterNames: true
+  DeducedTypes: true
