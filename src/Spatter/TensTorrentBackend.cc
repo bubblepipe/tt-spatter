@@ -19,6 +19,33 @@ using namespace tt::tt_metal;
 
 namespace Spatter {
 
+// Global debug flag for TensTorrent backend
+// Set to true for verbose debugging, false for quiet operation
+bool enable_tt_debug = false;
+
+// Debug output wrapper that only prints when debugging is enabled
+class TTDebugStream {
+public:
+    template<typename T>
+    TTDebugStream& operator<<(const T& value) {
+        if (enable_tt_debug) {
+            std::cout << value;
+        }
+        return *this;
+    }
+    
+    // Handle stream manipulators like std::endl
+    TTDebugStream& operator<<(std::ostream& (*manip)(std::ostream&)) {
+        if (enable_tt_debug) {
+            std::cout << manip;
+        }
+        return *this;
+    }
+};
+
+// Global debug stream instance
+static TTDebugStream tt_debug;
+
 TensTorrentDevice::TensTorrentDevice(int device_id, int num_cores) 
     : device_id_(device_id), initialized_(false), device_(nullptr), command_queue_(nullptr), num_cores_(num_cores) {
 }
@@ -103,12 +130,12 @@ void TensTorrentDevice::cleanup() {
 void print_buffer_config(const InterleavedBufferConfig& config) {
     uint32_t num_tiles = config.size / (32 * 32 * 2);  // 2KB per tile
     
-    std::cout << "buffer config:"<< std::endl; 
-    std::cout << "  Buffer size: " << config.size << " bytes (" 
+    tt_debug << "buffer config:" << std::endl; 
+    tt_debug << "  Buffer size: " << config.size << " bytes (" 
               << config.size / 1024 << " KB)" << std::endl;
-    std::cout << "  Page size: " << config.page_size << " bytes" << std::endl;
-    std::cout << "  Number of tiles: " << num_tiles << std::endl;
-    std::cout << "  Buffer type: " << (config.buffer_type == BufferType::DRAM ? "DRAM" : "L1") << std::endl;
+    tt_debug << "  Page size: " << config.page_size << " bytes" << std::endl;
+    tt_debug << "  Number of tiles: " << num_tiles << std::endl;
+    tt_debug << "  Buffer type: " << (config.buffer_type == BufferType::DRAM ? "DRAM" : "L1") << std::endl;
 }
 
 std::shared_ptr<tt::tt_metal::Buffer> TensTorrentDevice::allocate_buffer(size_t size_bytes, 
@@ -152,7 +179,7 @@ std::shared_ptr<tt::tt_metal::Buffer> TensTorrentDevice::allocate_buffer(size_t 
 
 void TensTorrentDevice::write_buffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
                                      const std::vector<double>& data, bool blocking) {
-    std::cout << "[DEBUG] write_buffer(double) called with " << data.size() << " elements" << std::endl;
+    tt_debug << "[DEBUG] write_buffer(double) called with " << data.size() << " elements" << std::endl;
     if (!initialized_) {
         throw std::runtime_error("TensTorrent device not initialized");
     }
@@ -188,10 +215,10 @@ void TensTorrentDevice::write_buffer(std::shared_ptr<tt::tt_metal::Buffer> buffe
         throw std::runtime_error("Invalid converted data for TT-Metal buffer write");
     }
     
-    std::cout << "[DEBUG] About to call EnqueueWriteBuffer(BFloat16) with " << tt_data.size() << " elements" << std::endl;
-    std::cout << "[DEBUG] Buffer address: 0x" << std::hex << buffer->address() << std::dec 
+    tt_debug << "[DEBUG] About to call EnqueueWriteBuffer(BFloat16) with " << tt_data.size() << " elements" << std::endl;
+    tt_debug << "[DEBUG] Buffer address: 0x" << std::hex << buffer->address() << std::dec 
               << ", Buffer size: " << buffer->size() << " bytes" << std::endl;
-    std::cout << "[DEBUG] Data vector address: " << std::hex << (void*)tt_data.data() << std::dec 
+    tt_debug << "[DEBUG] Data vector address: " << std::hex << (void*)tt_data.data() << std::dec 
               << ", Data size in bytes: " << (tt_data.size() * sizeof(bfloat16)) << std::endl;
     
     // Verify data size doesn't exceed buffer size
@@ -214,7 +241,7 @@ void TensTorrentDevice::write_buffer(std::shared_ptr<tt::tt_metal::Buffer> buffe
         std::cerr << "  Data size: " << data_bytes << " bytes" << std::endl;
         throw;
     }
-    std::cout << "[DEBUG] EnqueueWriteBuffer(BFloat16) execution successful" << std::endl ;
+    tt_debug << "[DEBUG] EnqueueWriteBuffer(BFloat16) execution successful" << std::endl;
 }
 
 void TensTorrentDevice::read_buffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
@@ -255,16 +282,16 @@ void TensTorrentDevice::writeBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer
     std::vector<uint32_t> aligned_data = data;
     aligned_data.resize(aligned_size, 0); // Pad with zeros
     
-    std::cout << "[DEBUG] About to call EnqueueWriteBuffer(uint32_t) with " << aligned_data.size() << " elements" << std::endl;
-    std::cout << "[DEBUG] Buffer address: 0x" << std::hex << buffer->address() << std::dec 
+    tt_debug << "[DEBUG] About to call EnqueueWriteBuffer(uint32_t) with " << aligned_data.size() << " elements" << std::endl;
+    tt_debug << "[DEBUG] Buffer address: 0x" << std::hex << buffer->address() << std::dec 
               << ", Buffer size: " << buffer->size() << " bytes" << std::endl;
     EnqueueWriteBuffer(*command_queue_, buffer, aligned_data, blocking);
-    std::cout << "[DEBUG] EnqueueWriteBuffer(uint32_t) execution successful" << std::endl ;
+    tt_debug << "[DEBUG] EnqueueWriteBuffer(uint32_t) execution successful" << std::endl;
 }
 
 void TensTorrentDevice::writeBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
                                     const aligned_vector<double>& data, bool blocking) {
-    std::cout << "[DEBUG] writeBuffer(aligned_vector<double>) called with " << data.size() << " elements" << std::endl;
+    tt_debug << "[DEBUG] writeBuffer(aligned_vector<double>) called with " << data.size() << " elements" << std::endl;
     // Convert aligned_vector<double> to std::vector<double> and use existing method
     std::vector<double> std_data(data.begin(), data.end());
     write_buffer(buffer, std_data, blocking);
@@ -272,7 +299,7 @@ void TensTorrentDevice::writeBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer
 
 void TensTorrentDevice::writeBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
                                     const aligned_vector<size_t>& data, bool blocking) {
-    std::cout << "[DEBUG] writeBuffer(aligned_vector<size_t>) called with " << data.size() << " elements" << std::endl;
+    tt_debug << "[DEBUG] writeBuffer(aligned_vector<size_t>) called with " << data.size() << " elements" << std::endl;
     // Convert aligned_vector<size_t> to std::vector<uint32_t> for TT-Metal
     std::vector<uint32_t> uint32_data;
     uint32_data.reserve(data.size());
@@ -323,36 +350,36 @@ bool TensTorrentDevice::executeGatherKernel(
             split_work_to_cores(core_grid, num_elements, row_major);
         
         // Debug output for multi-core analysis
-        std::cout << "[TensTorrent Gather] Multi-core debug info:" << std::endl;
-        std::cout << "  - Requested cores (--tt-cores): " << num_cores_ << std::endl;
-        std::cout << "  - Device grid size: " << compute_grid_size_.x << "x" << compute_grid_size_.y 
+        tt_debug << "[TensTorrent Gather] Multi-core debug info:" << std::endl;
+        tt_debug << "  - Requested cores (--tt-cores): " << num_cores_ << std::endl;
+        tt_debug << "  - Device grid size: " << compute_grid_size_.x << "x" << compute_grid_size_.y 
                   << " = " << (compute_grid_size_.x * compute_grid_size_.y) << " cores" << std::endl;
-        std::cout << "  - Effective grid size: " << effective_grid_size_.x << "x" << effective_grid_size_.y 
+        tt_debug << "  - Effective grid size: " << effective_grid_size_.x << "x" << effective_grid_size_.y 
                   << " = " << (effective_grid_size_.x * effective_grid_size_.y) << " cores" << std::endl;
-        std::cout << "  - Core grid passed to split_work: " << core_grid.x << "x" << core_grid.y 
+        tt_debug << "  - Core grid passed to split_work: " << core_grid.x << "x" << core_grid.y 
                   << " = " << (core_grid.x * core_grid.y) << " cores" << std::endl;
-        std::cout << "  - Cores actually used: " << num_cores << std::endl;
-        std::cout << "  - Elements to process: " << num_elements << std::endl;
-        std::cout << "  - Elements per core (group 1): " << elements_per_core_group_1 << std::endl;
-        std::cout << "  - Elements per core (group 2): " << elements_per_core_group_2 << std::endl;
-        std::cout << "  - Number of cores in group 1: " << core_group_1.num_cores() << std::endl;
-        std::cout << "  - Number of cores in group 2: " << core_group_2.num_cores() << std::endl;
+        tt_debug << "  - Cores actually used: " << num_cores << std::endl;
+        tt_debug << "  - Elements to process: " << num_elements << std::endl;
+        tt_debug << "  - Elements per core (group 1): " << elements_per_core_group_1 << std::endl;
+        tt_debug << "  - Elements per core (group 2): " << elements_per_core_group_2 << std::endl;
+        tt_debug << "  - Number of cores in group 1: " << core_group_1.num_cores() << std::endl;
+        tt_debug << "  - Number of cores in group 2: " << core_group_2.num_cores() << std::endl;
         
         // Additional debug for crash investigation
         bool is_power_of_2 = (num_elements & (num_elements - 1)) == 0;
         if (is_power_of_2) {
-            std::cout << "  ⚠ WARNING: Size is exact power of 2!" << std::endl;
+            tt_debug << "  ⚠ WARNING: Size is exact power of 2!" << std::endl;
         }
         
         // Check buffer sizes
         size_t pattern_bytes = num_elements * sizeof(uint32_t);
         size_t sparse_bytes = num_elements * sizeof(bfloat16);
         size_t dense_bytes = num_elements * sizeof(bfloat16);
-        std::cout << "  - Buffer sizes:" << std::endl;
-        std::cout << "    - Pattern: " << pattern_bytes << " bytes (" << pattern_bytes/1024 << " KB)" << std::endl;
-        std::cout << "    - Sparse: " << sparse_bytes << " bytes (" << sparse_bytes/1024 << " KB)" << std::endl;
-        std::cout << "    - Dense: " << dense_bytes << " bytes (" << dense_bytes/1024 << " KB)" << std::endl;
-        std::cout << "    - Total DRAM: " << (pattern_bytes + sparse_bytes + dense_bytes) << " bytes (" 
+        tt_debug << "  - Buffer sizes:" << std::endl;
+        tt_debug << "    - Pattern: " << pattern_bytes << " bytes (" << pattern_bytes/1024 << " KB)" << std::endl;
+        tt_debug << "    - Sparse: " << sparse_bytes << " bytes (" << sparse_bytes/1024 << " KB)" << std::endl;
+        tt_debug << "    - Dense: " << dense_bytes << " bytes (" << dense_bytes/1024 << " KB)" << std::endl;
+        tt_debug << "    - Total DRAM: " << (pattern_bytes + sparse_bytes + dense_bytes) << " bytes (" 
                   << (pattern_bytes + sparse_bytes + dense_bytes)/1024 << " KB)" << std::endl;
         
         // Create L1 buffers on all cores
@@ -467,20 +494,20 @@ bool TensTorrentDevice::executeScatterKernel(
             split_work_to_cores(core_grid, num_elements, row_major);
         
         // Debug output for multi-core analysis
-        std::cout << "[TensTorrent Scatter] Multi-core debug info:" << std::endl;
-        std::cout << "  - Requested cores (--tt-cores): " << num_cores_ << std::endl;
-        std::cout << "  - Device grid size: " << compute_grid_size_.x << "x" << compute_grid_size_.y 
+        tt_debug << "[TensTorrent Scatter] Multi-core debug info:" << std::endl;
+        tt_debug << "  - Requested cores (--tt-cores): " << num_cores_ << std::endl;
+        tt_debug << "  - Device grid size: " << compute_grid_size_.x << "x" << compute_grid_size_.y 
                   << " = " << (compute_grid_size_.x * compute_grid_size_.y) << " cores" << std::endl;
-        std::cout << "  - Effective grid size: " << effective_grid_size_.x << "x" << effective_grid_size_.y 
+        tt_debug << "  - Effective grid size: " << effective_grid_size_.x << "x" << effective_grid_size_.y 
                   << " = " << (effective_grid_size_.x * effective_grid_size_.y) << " cores" << std::endl;
-        std::cout << "  - Core grid passed to split_work: " << core_grid.x << "x" << core_grid.y 
+        tt_debug << "  - Core grid passed to split_work: " << core_grid.x << "x" << core_grid.y 
                   << " = " << (core_grid.x * core_grid.y) << " cores" << std::endl;
-        std::cout << "  - Cores actually used: " << num_cores << std::endl;
-        std::cout << "  - Elements to process: " << num_elements << std::endl;
-        std::cout << "  - Elements per core (group 1): " << elements_per_core_group_1 << std::endl;
-        std::cout << "  - Elements per core (group 2): " << elements_per_core_group_2 << std::endl;
-        std::cout << "  - Number of cores in group 1: " << core_group_1.num_cores() << std::endl;
-        std::cout << "  - Number of cores in group 2: " << core_group_2.num_cores() << std::endl;
+        tt_debug << "  - Cores actually used: " << num_cores << std::endl;
+        tt_debug << "  - Elements to process: " << num_elements << std::endl;
+        tt_debug << "  - Elements per core (group 1): " << elements_per_core_group_1 << std::endl;
+        tt_debug << "  - Elements per core (group 2): " << elements_per_core_group_2 << std::endl;
+        tt_debug << "  - Number of cores in group 1: " << core_group_1.num_cores() << std::endl;
+        tt_debug << "  - Number of cores in group 2: " << core_group_2.num_cores() << std::endl;
         
         // Create L1 buffers on all cores
         InterleavedBufferConfig l1_pattern_config{

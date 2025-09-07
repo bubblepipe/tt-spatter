@@ -13,6 +13,32 @@ namespace Spatter {
 // Set to true for debugging, false for production performance
 static bool enable_tt_validation = true;
 
+// External debug flag defined in TensTorrentBackend.cc
+extern bool enable_tt_debug;
+
+// Debug output wrapper that only prints when debugging is enabled
+class TTDebugStream {
+public:
+    template<typename T>
+    TTDebugStream& operator<<(const T& value) {
+        if (enable_tt_debug) {
+            std::cout << value;
+        }
+        return *this;
+    }
+    
+    // Handle stream manipulators like std::endl
+    TTDebugStream& operator<<(std::ostream& (*manip)(std::ostream&)) {
+        if (enable_tt_debug) {
+            std::cout << manip;
+        }
+        return *this;
+    }
+};
+
+// Global debug stream instance
+static TTDebugStream tt_debug;
+
 ConfigurationBase::ConfigurationBase(const size_t id, const std::string name,
     std::string k, const aligned_vector<size_t> &pattern,
     const aligned_vector<size_t> &pattern_gather,
@@ -1013,7 +1039,7 @@ void Configuration<Spatter::TensTorrent>::setup() {
         // Create buffers for pattern arrays (using size_t -> uint32_t conversion)
         if (!pattern.empty()) {
             size_t pattern_size_bytes = round_to_tiles(pattern.size() * sizeof(uint32_t));
-            std::cout << "tt_pattern_buffer_"<< std::endl; 
+            tt_debug << "tt_pattern_buffer_" << std::endl; 
             tt_pattern_buffer_ = tt_device_->allocate_buffer(pattern_size_bytes);
             if (!tt_pattern_buffer_) {
                 throw std::runtime_error("Failed to create pattern buffer");
@@ -1022,20 +1048,20 @@ void Configuration<Spatter::TensTorrent>::setup() {
         
         if (!pattern_gather.empty()) {
             size_t pattern_gather_size_bytes = round_to_tiles(pattern_gather.size() * sizeof(uint32_t));
-            std::cout << "tt_pattern_gather_buffer_"<< std::endl; 
+            tt_debug << "tt_pattern_gather_buffer_" << std::endl; 
             tt_pattern_gather_buffer_ = tt_device_->allocate_buffer(pattern_gather_size_bytes);
         }
         
         if (!pattern_scatter.empty()) {
             size_t pattern_scatter_size_bytes = round_to_tiles(pattern_scatter.size() * sizeof(uint32_t));
-            std::cout << "tt_pattern_scatter_buffer_"<< std::endl; 
+            tt_debug << "tt_pattern_scatter_buffer_" << std::endl; 
             tt_pattern_scatter_buffer_ = tt_device_->allocate_buffer(pattern_scatter_size_bytes);
         }
         
         // Create buffers for data arrays (double -> BFloat16 conversion)
         if (!sparse.empty()) {
             size_t sparse_size_bytes = round_to_tiles(sparse.size() * 2); // BFloat16 = 2 bytes
-            std::cout << "tt_sparse_buffer_"<< std::endl; 
+            tt_debug << "tt_sparse_buffer_" << std::endl; 
             tt_sparse_buffer_ = tt_device_->allocate_buffer(sparse_size_bytes);
             if (!tt_sparse_buffer_) {
                 throw std::runtime_error("Failed to create sparse buffer");
@@ -1044,7 +1070,7 @@ void Configuration<Spatter::TensTorrent>::setup() {
         
         if (!dense.empty()) {
             size_t dense_size_bytes = round_to_tiles(dense.size() * 2); // BFloat16 = 2 bytes  
-            std::cout << "tt_dense_buffer_"<< std::endl; 
+            tt_debug << "tt_dense_buffer_" << std::endl; 
             tt_dense_buffer_ = tt_device_->allocate_buffer(dense_size_bytes);
             if (!tt_dense_buffer_) {
                 throw std::runtime_error("Failed to create dense buffer");
@@ -1069,9 +1095,9 @@ void Configuration<Spatter::TensTorrent>::setup() {
         }
         
         if (tt_sparse_buffer_) {
-            std::cout << "writeBuffer for tt_sparce_buffer_ start"<< std::endl; 
+            tt_debug << "writeBuffer for tt_sparse_buffer_ start" << std::endl; 
             tt_device_->writeBuffer(tt_sparse_buffer_, sparse);
-            std::cout << "writeBuffer for tt_sparce_buffer_ end"<< std::endl; 
+            tt_debug << "writeBuffer for tt_sparse_buffer_ end" << std::endl; 
             
         }
         
@@ -1088,9 +1114,9 @@ void Configuration<Spatter::TensTorrent>::setup() {
                     dense[i] = 0.0;
                 }
             }
-            std::cout << "writeBuffer for tt_dense_buffer_ start"<< std::endl; 
+            tt_debug << "writeBuffer for tt_dense_buffer_ start" << std::endl; 
             tt_device_->writeBuffer(tt_dense_buffer_, dense);
-            std::cout << "writeBuffer for tt_dense_buffer_ end"<< std::endl; 
+            tt_debug << "writeBuffer for tt_dense_buffer_ end" << std::endl; 
         }
         
         // Ensure all buffer writes are complete before kernel execution

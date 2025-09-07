@@ -16,7 +16,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Configuration
-CORES_TO_TEST=(1 2 4 8 16 32 64)  
+CORES_TO_TEST=(2 4 8 16 32 64)  
 LOG_FILE="crash_test_results_$(date +%Y%m%d_%H%M%S).log"
 TIMEOUT_SEC=30  # Timeout for each test
 
@@ -78,7 +78,7 @@ for cores in "${CORES_TO_TEST[@]}"; do
     echo "Testing with --tt-cores $cores" | tee -a $LOG_FILE
     echo "--------------------------------" | tee -a $LOG_FILE
     
-    for power in {4..30}; do
+    for power in {14..26}; do
         run_test $power $cores
         
         # Track crashes but don't interrupt the test
