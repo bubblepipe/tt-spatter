@@ -99,6 +99,18 @@ void TensTorrentDevice::cleanup() {
     initialized_ = false;
 }
 
+// Helper function to pretty-print buffer configuration
+void print_buffer_config(const InterleavedBufferConfig& config) {
+    uint32_t num_tiles = config.size / (32 * 32 * 2);  // 2KB per tile
+    
+    std::cout << "buffer config:"<< std::endl; 
+    std::cout << "  Buffer size: " << config.size << " bytes (" 
+              << config.size / 1024 << " KB)" << std::endl;
+    std::cout << "  Page size: " << config.page_size << " bytes" << std::endl;
+    std::cout << "  Number of tiles: " << num_tiles << std::endl;
+    std::cout << "  Buffer type: " << (config.buffer_type == BufferType::DRAM ? "DRAM" : "L1") << std::endl;
+}
+
 std::shared_ptr<tt::tt_metal::Buffer> TensTorrentDevice::allocate_buffer(size_t size_bytes, 
                                                                          tt::tt_metal::BufferType type) {
     if (!initialized_) {
@@ -119,28 +131,28 @@ std::shared_ptr<tt::tt_metal::Buffer> TensTorrentDevice::allocate_buffer(size_t 
     // Check if this is a potentially problematic size
     bool is_power_of_2 = (aligned_size & (aligned_size - 1)) == 0;
     
+    // Always use TILE_SIZE_BYTES as page_size for DRAM buffers
+    // This matches the TT-Metal examples (loopback, vecadd_multi_core)
+    size_t page_size = TILE_SIZE_BYTES;
+    
     InterleavedBufferConfig config{
         .device = device_,
         .size = aligned_size,
-        .page_size = TILE_SIZE_BYTES,
+        .page_size = page_size,
         .buffer_type = type
     };
     
     
-    try {
-        auto buffer = CreateBuffer(config);
-        return buffer;
-    } catch (const std::exception& e) {
-        std::cerr << "ERROR: CreateBuffer failed with size " << aligned_size 
-                  << " bytes: " << e.what() << std::endl;
-        throw;
-    }
-}
+    print_buffer_config(config);
 
-// Method removed - use allocate_buffer directly
+    auto buffer = CreateBuffer(config);
+    return buffer;
+
+}
 
 void TensTorrentDevice::write_buffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
                                      const std::vector<double>& data, bool blocking) {
+    std::cout << "[DEBUG] write_buffer(double) called with " << data.size() << " elements" << std::endl;
     if (!initialized_) {
         throw std::runtime_error("TensTorrent device not initialized");
     }
@@ -158,27 +170,51 @@ void TensTorrentDevice::write_buffer(std::shared_ptr<tt::tt_metal::Buffer> buffe
     size_t tile_elements = TILE_SIZE_BYTES / sizeof(bfloat16);
     size_t aligned_size = ((data.size() + tile_elements - 1) / tile_elements) * tile_elements;
     
-    std::vector<bfloat16> tt_data;
-    tt_data.reserve(aligned_size);
+    // Create vector with exact aligned size (no extra padding)
+    // This matches TT-Metal examples which don't add extra padding
+    std::vector<bfloat16> tt_data(aligned_size);
     
+    // Copy actual data
     for (size_t i = 0; i < data.size(); ++i) {
-        tt_data.push_back(bfloat16(static_cast<float>(data[i])));
+        tt_data[i] = bfloat16(static_cast<float>(data[i]));
     }
     
+    // Zero out padding
     for (size_t i = data.size(); i < aligned_size; ++i) {
-        tt_data.push_back(bfloat16(0.0f));
+        tt_data[i] = bfloat16(0.0f);
     }
     
     if (tt_data.empty() || !tt_data.data()) {
         throw std::runtime_error("Invalid converted data for TT-Metal buffer write");
     }
     
+    std::cout << "[DEBUG] About to call EnqueueWriteBuffer(BFloat16) with " << tt_data.size() << " elements" << std::endl;
+    std::cout << "[DEBUG] Buffer address: 0x" << std::hex << buffer->address() << std::dec 
+              << ", Buffer size: " << buffer->size() << " bytes" << std::endl;
+    std::cout << "[DEBUG] Data vector address: " << std::hex << (void*)tt_data.data() << std::dec 
+              << ", Data size in bytes: " << (tt_data.size() * sizeof(bfloat16)) << std::endl;
+    
+    // Verify data size doesn't exceed buffer size
+    size_t data_bytes = tt_data.size() * sizeof(bfloat16);
+    if (data_bytes > buffer->size()) {
+        std::cerr << "ERROR: Data size (" << data_bytes << " bytes) exceeds buffer size (" 
+                  << buffer->size() << " bytes)" << std::endl;
+        throw std::runtime_error("Data size exceeds buffer size");
+    }
+    
     try {
-        EnqueueWriteBuffer(*command_queue_, buffer, tt_data, blocking);
+        // Always use blocking write to ensure data is copied before vector goes out of scope
+        EnqueueWriteBuffer(*command_queue_, buffer, tt_data, true);
+        // Add explicit finish to ensure write completes
+        Finish(*command_queue_);
     } catch (const std::exception& e) {
         std::cerr << "ERROR: EnqueueWriteBuffer failed: " << e.what() << std::endl;
+        std::cerr << "  Buffer type: " << (buffer->buffer_type() == BufferType::DRAM ? "DRAM" : "L1") << std::endl;
+        std::cerr << "  Buffer size: " << buffer->size() << " bytes" << std::endl;
+        std::cerr << "  Data size: " << data_bytes << " bytes" << std::endl;
         throw;
     }
+    std::cout << "[DEBUG] EnqueueWriteBuffer(BFloat16) execution successful" << std::endl ;
 }
 
 void TensTorrentDevice::read_buffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
@@ -203,10 +239,6 @@ void TensTorrentDevice::read_buffer(std::shared_ptr<tt::tt_metal::Buffer> buffer
     }
 }
 
-// Method removed - use read_buffer directly
-
-// Method removed - use write_buffer directly
-
 void TensTorrentDevice::writeBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
                                     const std::vector<uint32_t>& data, bool blocking) {
     if (!initialized_) {
@@ -223,11 +255,16 @@ void TensTorrentDevice::writeBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer
     std::vector<uint32_t> aligned_data = data;
     aligned_data.resize(aligned_size, 0); // Pad with zeros
     
+    std::cout << "[DEBUG] About to call EnqueueWriteBuffer(uint32_t) with " << aligned_data.size() << " elements" << std::endl;
+    std::cout << "[DEBUG] Buffer address: 0x" << std::hex << buffer->address() << std::dec 
+              << ", Buffer size: " << buffer->size() << " bytes" << std::endl;
     EnqueueWriteBuffer(*command_queue_, buffer, aligned_data, blocking);
+    std::cout << "[DEBUG] EnqueueWriteBuffer(uint32_t) execution successful" << std::endl ;
 }
 
 void TensTorrentDevice::writeBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
                                     const aligned_vector<double>& data, bool blocking) {
+    std::cout << "[DEBUG] writeBuffer(aligned_vector<double>) called with " << data.size() << " elements" << std::endl;
     // Convert aligned_vector<double> to std::vector<double> and use existing method
     std::vector<double> std_data(data.begin(), data.end());
     write_buffer(buffer, std_data, blocking);
@@ -235,6 +272,7 @@ void TensTorrentDevice::writeBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer
 
 void TensTorrentDevice::writeBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer, 
                                     const aligned_vector<size_t>& data, bool blocking) {
+    std::cout << "[DEBUG] writeBuffer(aligned_vector<size_t>) called with " << data.size() << " elements" << std::endl;
     // Convert aligned_vector<size_t> to std::vector<uint32_t> for TT-Metal
     std::vector<uint32_t> uint32_data;
     uint32_data.reserve(data.size());
@@ -257,9 +295,6 @@ void TensTorrentDevice::readBuffer(std::shared_ptr<tt::tt_metal::Buffer> buffer,
         data.push_back(val);
     }
 }
-
-// Legacy method removed - use executeGatherKernel instead
-
 bool TensTorrentDevice::executeGatherKernel(
     std::shared_ptr<tt::tt_metal::Buffer> src_buffer,
     std::shared_ptr<tt::tt_metal::Buffer> dst_buffer,
@@ -302,6 +337,23 @@ bool TensTorrentDevice::executeGatherKernel(
         std::cout << "  - Elements per core (group 2): " << elements_per_core_group_2 << std::endl;
         std::cout << "  - Number of cores in group 1: " << core_group_1.num_cores() << std::endl;
         std::cout << "  - Number of cores in group 2: " << core_group_2.num_cores() << std::endl;
+        
+        // Additional debug for crash investigation
+        bool is_power_of_2 = (num_elements & (num_elements - 1)) == 0;
+        if (is_power_of_2) {
+            std::cout << "  ⚠ WARNING: Size is exact power of 2!" << std::endl;
+        }
+        
+        // Check buffer sizes
+        size_t pattern_bytes = num_elements * sizeof(uint32_t);
+        size_t sparse_bytes = num_elements * sizeof(bfloat16);
+        size_t dense_bytes = num_elements * sizeof(bfloat16);
+        std::cout << "  - Buffer sizes:" << std::endl;
+        std::cout << "    - Pattern: " << pattern_bytes << " bytes (" << pattern_bytes/1024 << " KB)" << std::endl;
+        std::cout << "    - Sparse: " << sparse_bytes << " bytes (" << sparse_bytes/1024 << " KB)" << std::endl;
+        std::cout << "    - Dense: " << dense_bytes << " bytes (" << dense_bytes/1024 << " KB)" << std::endl;
+        std::cout << "    - Total DRAM: " << (pattern_bytes + sparse_bytes + dense_bytes) << " bytes (" 
+                  << (pattern_bytes + sparse_bytes + dense_bytes)/1024 << " KB)" << std::endl;
         
         // Create L1 buffers on all cores
         InterleavedBufferConfig l1_pattern_config{

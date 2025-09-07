@@ -11,7 +11,7 @@ namespace Spatter {
 
 // Global flag to enable/disable TensTorrent kernel validation
 // Set to true for debugging, false for production performance
-static bool enable_tt_validation = false;
+static bool enable_tt_validation = true;
 
 ConfigurationBase::ConfigurationBase(const size_t id, const std::string name,
     std::string k, const aligned_vector<size_t> &pattern,
@@ -985,9 +985,9 @@ void Configuration<Spatter::TensTorrent>::setup() {
     constexpr size_t tile_size_bytes = 32 * 32 * 2; // 2048 bytes
     constexpr size_t elements_per_tile = 32 * 32;   // 1024 elements
     
-    // Helper function to round up to tile boundary
-    auto round_to_tiles = [](size_t elements) -> size_t {
-        return ((elements + elements_per_tile - 1) / elements_per_tile) * tile_size_bytes;
+    // Helper function to round up to tile boundary (takes bytes, returns bytes)
+    auto round_to_tiles = [](size_t bytes) -> size_t {
+        return ((bytes + tile_size_bytes - 1) / tile_size_bytes) * tile_size_bytes;
     };
     
     // Ensure data vectors are properly sized (like other backends)
@@ -1013,6 +1013,7 @@ void Configuration<Spatter::TensTorrent>::setup() {
         // Create buffers for pattern arrays (using size_t -> uint32_t conversion)
         if (!pattern.empty()) {
             size_t pattern_size_bytes = round_to_tiles(pattern.size() * sizeof(uint32_t));
+            std::cout << "tt_pattern_buffer_"<< std::endl; 
             tt_pattern_buffer_ = tt_device_->allocate_buffer(pattern_size_bytes);
             if (!tt_pattern_buffer_) {
                 throw std::runtime_error("Failed to create pattern buffer");
@@ -1021,17 +1022,20 @@ void Configuration<Spatter::TensTorrent>::setup() {
         
         if (!pattern_gather.empty()) {
             size_t pattern_gather_size_bytes = round_to_tiles(pattern_gather.size() * sizeof(uint32_t));
+            std::cout << "tt_pattern_gather_buffer_"<< std::endl; 
             tt_pattern_gather_buffer_ = tt_device_->allocate_buffer(pattern_gather_size_bytes);
         }
         
         if (!pattern_scatter.empty()) {
             size_t pattern_scatter_size_bytes = round_to_tiles(pattern_scatter.size() * sizeof(uint32_t));
+            std::cout << "tt_pattern_scatter_buffer_"<< std::endl; 
             tt_pattern_scatter_buffer_ = tt_device_->allocate_buffer(pattern_scatter_size_bytes);
         }
         
         // Create buffers for data arrays (double -> BFloat16 conversion)
         if (!sparse.empty()) {
             size_t sparse_size_bytes = round_to_tiles(sparse.size() * 2); // BFloat16 = 2 bytes
+            std::cout << "tt_sparse_buffer_"<< std::endl; 
             tt_sparse_buffer_ = tt_device_->allocate_buffer(sparse_size_bytes);
             if (!tt_sparse_buffer_) {
                 throw std::runtime_error("Failed to create sparse buffer");
@@ -1040,6 +1044,7 @@ void Configuration<Spatter::TensTorrent>::setup() {
         
         if (!dense.empty()) {
             size_t dense_size_bytes = round_to_tiles(dense.size() * 2); // BFloat16 = 2 bytes  
+            std::cout << "tt_dense_buffer_"<< std::endl; 
             tt_dense_buffer_ = tt_device_->allocate_buffer(dense_size_bytes);
             if (!tt_dense_buffer_) {
                 throw std::runtime_error("Failed to create dense buffer");
@@ -1064,8 +1069,9 @@ void Configuration<Spatter::TensTorrent>::setup() {
         }
         
         if (tt_sparse_buffer_) {
-            
+            std::cout << "writeBuffer for tt_sparce_buffer_ start"<< std::endl; 
             tt_device_->writeBuffer(tt_sparse_buffer_, sparse);
+            std::cout << "writeBuffer for tt_sparce_buffer_ end"<< std::endl; 
             
         }
         
@@ -1082,7 +1088,9 @@ void Configuration<Spatter::TensTorrent>::setup() {
                     dense[i] = 0.0;
                 }
             }
+            std::cout << "writeBuffer for tt_dense_buffer_ start"<< std::endl; 
             tt_device_->writeBuffer(tt_dense_buffer_, dense);
+            std::cout << "writeBuffer for tt_dense_buffer_ end"<< std::endl; 
         }
         
         // Ensure all buffer writes are complete before kernel execution
