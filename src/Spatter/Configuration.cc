@@ -1444,32 +1444,225 @@ void Configuration<Spatter::TensTorrent>::gather_scatter(bool timed, unsigned lo
 }
 
 void Configuration<Spatter::TensTorrent>::multi_gather(bool timed, unsigned long run_id) {
-    // For now, fall back to serial implementation
-    // TODO: Implement actual TensTorrent multi-gather kernel execution
+    size_t pattern_length = this->pattern_gather.size();
+    
+    // Debug validation flag
+    static bool enable_tt_validation = false;
+    static bool enable_tt_debug = false;
+    
+    if (enable_tt_debug) {
+        std::cout << "[TensTorrent Multi-Gather Debug]" << std::endl;
+        std::cout << "  Pattern length: " << pattern_length << std::endl;
+        std::cout << "  Pattern_gather length: " << this->pattern_gather.size() << std::endl;
+        std::cout << "  Count: " << this->count << std::endl;
+        std::cout << "  Delta: " << this->delta << std::endl;
+        std::cout << "  Wrap: " << this->wrap << std::endl;
+        std::cout << "  Sparse size: " << this->sparse.size() << std::endl;
+        std::cout << "  Dense size: " << this->dense.size() << std::endl;
+    }
+    
+    // Ensure buffers are allocated
+    if (!tt_pattern_buffer_ || !tt_pattern_gather_buffer_ || 
+        !tt_sparse_buffer_ || !tt_dense_buffer_) {
+        std::cerr << "TensTorrent buffers not initialized" << std::endl;
+        return;
+    }
+    
     if (timed)
         this->timer.start();
     
-    // Simple placeholder implementation
-    gather(false, run_id);
+    // Calculate total elements to process
+    uint32_t num_elements = this->count * pattern_length;
+    
+    // Execute the multi-gather kernel
+    bool success = tt_device_->executeMultiGatherKernel(
+        tt_sparse_buffer_,
+        tt_dense_buffer_,
+        tt_pattern_buffer_,
+        tt_pattern_gather_buffer_,
+        num_elements,
+        this->delta,
+        this->count,
+        this->wrap,
+        pattern_length,
+        this->sparse.size()
+    );
+    
+    if (!success) {
+        std::cerr << "TensTorrent multi_gather kernel execution failed" << std::endl;
+    }
+    
+    // Read back dense buffer for validation or output
+    if (enable_tt_validation || !timed) {
+        tt_device_->readBuffer(tt_dense_buffer_, this->dense);
+    }
     
     if (timed) {
         this->timer.stop();
-        this->time_seconds.emplace_back(this->timer.seconds());
+        this->time_seconds[run_id] = this->timer.seconds();
+        this->timer.clear();
+    }
+    
+    // Validation
+    if (enable_tt_validation) {
+        std::cout << "[TensTorrent Multi-Gather Validation]" << std::endl;
+        
+        // Perform CPU reference computation
+        aligned_vector<double> reference_dense(this->dense.size(), 0.0);
+        for (size_t i = 0; i < this->count; ++i) {
+            for (size_t j = 0; j < pattern_length; ++j) {
+                size_t pattern_idx = this->pattern_gather[j];
+                size_t src_idx = this->pattern[pattern_idx] + this->delta * i;
+                size_t dst_idx = j + pattern_length * (i % this->wrap);
+                if (src_idx < this->sparse.size() && dst_idx < reference_dense.size()) {
+                    reference_dense[dst_idx] = this->sparse[src_idx];
+                }
+            }
+        }
+        
+        std::cout << "Expected first 5 dense values: ";
+        for (size_t i = 0; i < 5 && i < reference_dense.size(); i++) {
+            std::cout << reference_dense[i] << " ";
+        }
+        std::cout << std::endl;
+        
+        std::cout << "Actual first 5 dense values:   ";
+        for (size_t i = 0; i < 5 && i < this->dense.size(); i++) {
+            std::cout << this->dense[i] << " ";
+        }
+        std::cout << std::endl;
+        
+        // Check if values match (with BFloat16 tolerance)
+        const double tolerance = 0.01;
+        size_t mismatches = 0;
+        for (size_t i = 0; i < reference_dense.size() && i < this->dense.size(); i++) {
+            if (std::abs(reference_dense[i] - this->dense[i]) > tolerance) {
+                mismatches++;
+                if (mismatches <= 5) {
+                    std::cout << "  Mismatch at index " << i << ": expected " 
+                              << reference_dense[i] << ", got " << this->dense[i] << std::endl;
+                }
+            }
+        }
+        
+        if (mismatches == 0) {
+            std::cout << "✓ Multi-Gather kernel validation PASSED" << std::endl;
+        } else {
+            std::cout << "✗ Multi-Gather kernel validation FAILED with " << mismatches << " mismatches" << std::endl;
+        }
     }
 }
 
 void Configuration<Spatter::TensTorrent>::multi_scatter(bool timed, unsigned long run_id) {
-    // For now, fall back to serial implementation
-    // TODO: Implement actual TensTorrent multi-scatter kernel execution
+    size_t pattern_length = this->pattern_scatter.size();
+    
+    // Debug validation flag
+    static bool enable_tt_validation = false;
+    static bool enable_tt_debug = false;
+    
+    if (enable_tt_debug) {
+        std::cout << "[TensTorrent Multi-Scatter Debug]" << std::endl;
+        std::cout << "  Pattern length: " << pattern_length << std::endl;
+        std::cout << "  Pattern_scatter length: " << this->pattern_scatter.size() << std::endl;
+        std::cout << "  Count: " << this->count << std::endl;
+        std::cout << "  Delta: " << this->delta << std::endl;
+        std::cout << "  Wrap: " << this->wrap << std::endl;
+        std::cout << "  Sparse size: " << this->sparse.size() << std::endl;
+        std::cout << "  Dense size: " << this->dense.size() << std::endl;
+    }
+    
+    // Ensure buffers are allocated
+    if (!tt_pattern_buffer_ || !tt_pattern_scatter_buffer_ || 
+        !tt_sparse_buffer_ || !tt_dense_buffer_) {
+        std::cerr << "TensTorrent buffers not initialized" << std::endl;
+        return;
+    }
+    
+    // Upload dense buffer before scatter
+    tt_device_->writeBuffer(tt_dense_buffer_, this->dense);
+    
     if (timed)
         this->timer.start();
     
-    // Simple placeholder implementation
-    scatter(false, run_id);
+    // Calculate total elements to process
+    uint32_t num_elements = this->count * pattern_length;
+    
+    // Execute the multi-scatter kernel
+    bool success = tt_device_->executeMultiScatterKernel(
+        tt_sparse_buffer_,
+        tt_dense_buffer_,
+        tt_pattern_buffer_,
+        tt_pattern_scatter_buffer_,
+        num_elements,
+        this->delta,
+        this->count,
+        this->wrap,
+        pattern_length,
+        this->sparse.size()
+    );
+    
+    if (!success) {
+        std::cerr << "TensTorrent multi_scatter kernel execution failed" << std::endl;
+    }
+    
+    // Read back sparse buffer for validation or output
+    if (enable_tt_validation || !timed) {
+        tt_device_->readBuffer(tt_sparse_buffer_, this->sparse);
+    }
     
     if (timed) {
         this->timer.stop();
-        this->time_seconds.emplace_back(this->timer.seconds());
+        this->time_seconds[run_id] = this->timer.seconds();
+        this->timer.clear();
+    }
+    
+    // Validation
+    if (enable_tt_validation) {
+        std::cout << "[TensTorrent Multi-Scatter Validation]" << std::endl;
+        
+        // Perform CPU reference computation
+        aligned_vector<double> reference_sparse(this->sparse.size(), 0.0);
+        for (size_t i = 0; i < this->count; ++i) {
+            for (size_t j = 0; j < pattern_length; ++j) {
+                size_t pattern_idx = this->pattern_scatter[j];
+                size_t dst_idx = this->pattern[pattern_idx] + this->delta * i;
+                size_t src_idx = j + pattern_length * (i % this->wrap);
+                if (src_idx < this->dense.size() && dst_idx < reference_sparse.size()) {
+                    reference_sparse[dst_idx] = this->dense[src_idx];
+                }
+            }
+        }
+        
+        std::cout << "Expected first 5 sparse values: ";
+        for (size_t i = 0; i < 5 && i < reference_sparse.size(); i++) {
+            std::cout << reference_sparse[i] << " ";
+        }
+        std::cout << std::endl;
+        
+        std::cout << "Actual first 5 sparse values:   ";
+        for (size_t i = 0; i < 5 && i < this->sparse.size(); i++) {
+            std::cout << this->sparse[i] << " ";
+        }
+        std::cout << std::endl;
+        
+        // Check if values match (with BFloat16 tolerance)
+        const double tolerance = 0.01;
+        size_t mismatches = 0;
+        for (size_t i = 0; i < reference_sparse.size() && i < this->sparse.size(); i++) {
+            if (std::abs(reference_sparse[i] - this->sparse[i]) > tolerance) {
+                mismatches++;
+                if (mismatches <= 5) {
+                    std::cout << "  Mismatch at index " << i << ": expected " 
+                              << reference_sparse[i] << ", got " << this->sparse[i] << std::endl;
+                }
+            }
+        }
+        
+        if (mismatches == 0) {
+            std::cout << "✓ Multi-Scatter kernel validation PASSED" << std::endl;
+        } else {
+            std::cout << "✗ Multi-Scatter kernel validation FAILED with " << mismatches << " mismatches" << std::endl;
+        }
     }
 }
 #endif // USE_TENSTORRENT
