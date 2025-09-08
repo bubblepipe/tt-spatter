@@ -76,6 +76,16 @@ public:
         uint32_t num_elements,
         uint32_t delta,
         uint32_t pattern_length);
+        
+    bool executeGatherScatterKernel(
+        std::shared_ptr<tt::tt_metal::Buffer> sparse_gather_buffer,
+        std::shared_ptr<tt::tt_metal::Buffer> sparse_scatter_buffer,
+        std::shared_ptr<tt::tt_metal::Buffer> pattern_gather_buffer,
+        std::shared_ptr<tt::tt_metal::Buffer> pattern_scatter_buffer,
+        uint32_t num_elements,
+        uint32_t delta_gather,
+        uint32_t delta_scatter,
+        uint32_t pattern_length);
     
     // Device information
     std::string get_device_info() const;

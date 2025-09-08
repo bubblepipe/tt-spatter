@@ -282,6 +282,8 @@ public:
   std::shared_ptr<tt::tt_metal::Buffer> tt_pattern_scatter_buffer_;
   std::shared_ptr<tt::tt_metal::Buffer> tt_sparse_buffer_;
   std::shared_ptr<tt::tt_metal::Buffer> tt_dense_buffer_;
+  std::shared_ptr<tt::tt_metal::Buffer> tt_sparse_gather_buffer_;
+  std::shared_ptr<tt::tt_metal::Buffer> tt_sparse_scatter_buffer_;
 };
 #endif
 

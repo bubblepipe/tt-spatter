@@ -1,4 +1,4 @@
-/*!
+/*!w
   \file TensTorrentBackend.cc
 */
 
@@ -21,7 +21,7 @@ namespace Spatter {
 
 // Global debug flag for TensTorrent backend
 // Set to true for verbose debugging, false for quiet operation
-bool enable_tt_debug = false;
+bool enable_tt_debug = true;
 
 // Debug output wrapper that only prints when debugging is enabled
 class TTDebugStream {
@@ -590,6 +590,144 @@ bool TensTorrentDevice::executeScatterKernel(
         
     } catch (const std::exception& e) {
         std::cerr << "TensTorrent scatter kernel execution failed: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+bool TensTorrentDevice::executeGatherScatterKernel(
+    std::shared_ptr<tt::tt_metal::Buffer> sparse_gather_buffer,
+    std::shared_ptr<tt::tt_metal::Buffer> sparse_scatter_buffer,
+    std::shared_ptr<tt::tt_metal::Buffer> pattern_gather_buffer,
+    std::shared_ptr<tt::tt_metal::Buffer> pattern_scatter_buffer,
+    uint32_t num_elements,
+    uint32_t delta_gather,
+    uint32_t delta_scatter,
+    uint32_t pattern_length) {
+    
+    if (!initialized_ || !sparse_gather_buffer || !sparse_scatter_buffer || 
+        !pattern_gather_buffer || !pattern_scatter_buffer) {
+        return false;
+    }
+    
+    try {
+        Program gather_scatter_program = CreateProgram();
+        
+        // Tile size constants
+        constexpr uint32_t tile_size_bytes = 32 * 32 * 2;  // 2048 bytes per tile
+        
+        // Use the effective grid size based on --tt-cores parameter
+        auto core_grid = effective_grid_size_;
+        
+        // Split work across cores
+        constexpr bool row_major = true;
+        auto [num_cores, all_cores, core_group_1, core_group_2, 
+              elements_per_core_group_1, elements_per_core_group_2] = 
+            split_work_to_cores(core_grid, num_elements, row_major);
+        
+        // Debug output for multi-core analysis
+        tt_debug << "[TensTorrent Gather-Scatter] Multi-core debug info:" << std::endl;
+        tt_debug << "  - Requested cores (--tt-cores): " << num_cores_ << std::endl;
+        tt_debug << "  - Effective grid size: " << effective_grid_size_.x << "x" << effective_grid_size_.y 
+                  << " = " << (effective_grid_size_.x * effective_grid_size_.y) << " cores" << std::endl;
+        tt_debug << "  - Cores actually used: " << num_cores << std::endl;
+        tt_debug << "  - Elements to process: " << num_elements << std::endl;
+        tt_debug << "  - Elements per core (group 1): " << elements_per_core_group_1 << std::endl;
+        tt_debug << "  - Elements per core (group 2): " << elements_per_core_group_2 << std::endl;
+        
+        // Create L1 buffers on all cores (need 4 buffers for gather-scatter)
+        InterleavedBufferConfig l1_pattern_gather_config{
+            .device = device_,
+            .size = tile_size_bytes,
+            .page_size = tile_size_bytes,
+            .buffer_type = tt::tt_metal::BufferType::L1
+        };
+        
+        InterleavedBufferConfig l1_pattern_scatter_config{
+            .device = device_,
+            .size = tile_size_bytes,
+            .page_size = tile_size_bytes,
+            .buffer_type = tt::tt_metal::BufferType::L1
+        };
+        
+        InterleavedBufferConfig l1_sparse_gather_config{
+            .device = device_,
+            .size = tile_size_bytes,
+            .page_size = tile_size_bytes,
+            .buffer_type = tt::tt_metal::BufferType::L1
+        };
+        
+        InterleavedBufferConfig l1_sparse_scatter_config{
+            .device = device_,
+            .size = tile_size_bytes,
+            .page_size = tile_size_bytes,
+            .buffer_type = tt::tt_metal::BufferType::L1
+        };
+        
+        // Allocate the L1 buffers (shared across all cores)
+        auto l1_pattern_gather_buffer = CreateBuffer(l1_pattern_gather_config);
+        auto l1_pattern_scatter_buffer = CreateBuffer(l1_pattern_scatter_config);
+        auto l1_sparse_gather_buffer = CreateBuffer(l1_sparse_gather_config);
+        auto l1_sparse_scatter_buffer = CreateBuffer(l1_sparse_scatter_config);
+        
+        // Compile-time arguments for all 4 TensorAccessors
+        std::vector<uint32_t> compile_time_args;
+        TensorAccessorArgs(*sparse_gather_buffer).append_to(compile_time_args);
+        TensorAccessorArgs(*sparse_scatter_buffer).append_to(compile_time_args);
+        TensorAccessorArgs(*pattern_gather_buffer).append_to(compile_time_args);
+        TensorAccessorArgs(*pattern_scatter_buffer).append_to(compile_time_args);
+        
+        // Create kernel on all cores
+        KernelHandle gather_scatter_kernel_id = CreateKernel(
+            gather_scatter_program,
+            "/storage/tt/tt-spatter/src/Spatter/kernels/gather_scatter_kernel.cpp",
+            all_cores,  // Run on all cores
+            DataMovementConfig{
+                .processor = DataMovementProcessor::RISCV_0,
+                .noc = NOC::RISCV_0_default,
+                .compile_args = compile_time_args,
+                .defines = {}
+            }
+        );
+        
+        // Set runtime arguments for each core
+        uint32_t start_element = 0;
+        
+        // Set runtime args for group 1 cores
+        for (auto& group : {core_group_1, core_group_2}) {
+            uint32_t elements_per_core = (group == core_group_1) ? 
+                elements_per_core_group_1 : elements_per_core_group_2;
+                
+            for (const auto& range : group.ranges()) {
+                for (const auto& core : range) {
+                    const std::vector<uint32_t> runtime_args = {
+                        l1_pattern_gather_buffer->address(),   // arg0: pattern_gather L1 buffer
+                        l1_pattern_scatter_buffer->address(),  // arg1: pattern_scatter L1 buffer
+                        l1_sparse_gather_buffer->address(),    // arg2: sparse_gather L1 buffer (source)
+                        l1_sparse_scatter_buffer->address(),   // arg3: sparse_scatter L1 buffer (destination)
+                        start_element,                         // arg4: start element for this core
+                        elements_per_core,                     // arg5: number of elements for this core
+                        delta_gather,                          // arg6: delta_gather
+                        delta_scatter,                         // arg7: delta_scatter
+                        pattern_length,                        // arg8: pattern length
+                        sparse_gather_buffer->address(),      // arg9: sparse_gather buffer (DRAM)
+                        sparse_scatter_buffer->address(),     // arg10: sparse_scatter buffer (DRAM)
+                        pattern_gather_buffer->address(),     // arg11: pattern_gather buffer (DRAM)
+                        pattern_scatter_buffer->address()     // arg12: pattern_scatter buffer (DRAM)
+                    };
+                    
+                    SetRuntimeArgs(gather_scatter_program, gather_scatter_kernel_id, core, runtime_args);
+                    start_element += elements_per_core;
+                }
+            }
+        }
+        
+        // Execute the program
+        EnqueueProgram(*command_queue_, gather_scatter_program, false);
+        Finish(*command_queue_);
+        return true;
+        
+    } catch (const std::exception& e) {
+        std::cerr << "TensTorrent gather_scatter kernel execution failed: " << e.what() << std::endl;
         return false;
     }
 }

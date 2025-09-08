@@ -1077,6 +1077,40 @@ void Configuration<Spatter::TensTorrent>::setup() {
             }
         }
         
+        // Create buffers for gather_scatter operation if needed
+        if (kernel.compare("gs") == 0) {
+            // Ensure sparse_gather and sparse_scatter are properly sized
+            if (sparse_gather.size() < sparse_gather_size) {
+                sparse_gather.resize(sparse_gather_size);
+                for (size_t i = 0; i < sparse_gather.size(); ++i) {
+                    sparse_gather[i] = static_cast<double>(rand()) / RAND_MAX;
+                }
+            }
+            
+            if (sparse_scatter.size() < sparse_scatter_size) {
+                sparse_scatter.resize(sparse_scatter_size);
+                for (size_t i = 0; i < sparse_scatter.size(); ++i) {
+                    sparse_scatter[i] = 0.0;  // Initialize to zero as it's the output
+                }
+            }
+            
+            // Allocate sparse_gather buffer
+            size_t sparse_gather_size_bytes = round_to_tiles(sparse_gather.size() * 2); // BFloat16
+            tt_debug << "tt_sparse_gather_buffer_" << std::endl;
+            tt_sparse_gather_buffer_ = tt_device_->allocate_buffer(sparse_gather_size_bytes);
+            if (!tt_sparse_gather_buffer_) {
+                throw std::runtime_error("Failed to create sparse_gather buffer");
+            }
+            
+            // Allocate sparse_scatter buffer
+            size_t sparse_scatter_size_bytes = round_to_tiles(sparse_scatter.size() * 2); // BFloat16
+            tt_debug << "tt_sparse_scatter_buffer_" << std::endl;
+            tt_sparse_scatter_buffer_ = tt_device_->allocate_buffer(sparse_scatter_size_bytes);
+            if (!tt_sparse_scatter_buffer_) {
+                throw std::runtime_error("Failed to create sparse_scatter buffer");
+            }
+        }
+        
         // Upload initial data to TT device
         if (tt_pattern_buffer_) {
             // Convert size_t pattern to uint32_t for TT-Metal
@@ -1117,6 +1151,21 @@ void Configuration<Spatter::TensTorrent>::setup() {
             tt_debug << "writeBuffer for tt_dense_buffer_ start" << std::endl; 
             tt_device_->writeBuffer(tt_dense_buffer_, dense);
             tt_debug << "writeBuffer for tt_dense_buffer_ end" << std::endl; 
+        }
+        
+        // Upload data for gather_scatter operation if needed
+        if (kernel.compare("gs") == 0) {
+            if (tt_sparse_gather_buffer_) {
+                tt_debug << "writeBuffer for tt_sparse_gather_buffer_ start" << std::endl;
+                tt_device_->writeBuffer(tt_sparse_gather_buffer_, sparse_gather);
+                tt_debug << "writeBuffer for tt_sparse_gather_buffer_ end" << std::endl;
+            }
+            
+            if (tt_sparse_scatter_buffer_) {
+                tt_debug << "writeBuffer for tt_sparse_scatter_buffer_ start" << std::endl;
+                tt_device_->writeBuffer(tt_sparse_scatter_buffer_, sparse_scatter);
+                tt_debug << "writeBuffer for tt_sparse_scatter_buffer_ end" << std::endl;
+            }
         }
         
         // Ensure all buffer writes are complete before kernel execution
@@ -1302,22 +1351,95 @@ void Configuration<Spatter::TensTorrent>::scatter(bool timed, unsigned long run_
 }
 
 void Configuration<Spatter::TensTorrent>::gather_scatter(bool timed, unsigned long run_id) {
-    // For now, fall back to serial implementation
-    // TODO: Implement actual TensTorrent gather-scatter kernel execution
-    size_t pattern_scatter_length = pattern_scatter.size();
-    size_t pattern_gather_length = pattern_gather.size();
+    size_t pattern_length = pattern_scatter.size();
+    bool kernel_result = false;
     
     if (timed)
         this->timer.start();
     
-    for (size_t i = 0; i < this->count; ++i)
-        for (size_t j = 0; j < pattern_scatter_length; ++j)
-            this->sparse_scatter[this->pattern_scatter[j] + this->delta_scatter * i] = 
-                this->sparse_gather[this->pattern_gather[j] + this->delta_gather * i];
+    try {
+        if (!tt_device_ || !tt_sparse_gather_buffer_ || !tt_sparse_scatter_buffer_ || 
+            !tt_pattern_gather_buffer_ || !tt_pattern_scatter_buffer_) {
+            throw std::runtime_error("TensTorrent buffers not properly initialized for gather_scatter");
+        }
+        
+        kernel_result = tt_device_->executeGatherScatterKernel(
+            tt_sparse_gather_buffer_,
+            tt_sparse_scatter_buffer_,
+            tt_pattern_gather_buffer_,
+            tt_pattern_scatter_buffer_,
+            static_cast<uint32_t>(pattern_length * this->count),
+            static_cast<uint32_t>(this->delta_gather),
+            static_cast<uint32_t>(this->delta_scatter),
+            static_cast<uint32_t>(pattern_length)
+        );
+        
+        if (kernel_result) {
+            tt_device_->sync();
+            tt_device_->readBuffer(tt_sparse_scatter_buffer_, this->sparse_scatter);
+        }
+        
+    } catch (const std::exception& e) {
+        std::cerr << "TensTorrent gather_scatter kernel execution failed: " << e.what() << std::endl;
+        // Fall back to serial implementation
+        for (size_t i = 0; i < this->count; ++i)
+            for (size_t j = 0; j < pattern_length; ++j)
+                this->sparse_scatter[this->pattern_scatter[j] + this->delta_scatter * i] = 
+                    this->sparse_gather[this->pattern_gather[j] + this->delta_gather * i];
+    }
     
     if (timed) {
         this->timer.stop();
-        this->time_seconds.emplace_back(this->timer.seconds());
+        this->time_seconds[run_id] = this->timer.seconds();
+        this->timer.clear();
+    }
+    
+    // Only perform validation if enabled (after timing to not affect performance measurement)
+    if (enable_tt_validation && kernel_result) {
+        std::cout << "\n=== Gather-Scatter Kernel Validation ===" << std::endl;
+        
+        // Perform CPU reference computation for validation
+        aligned_vector<double> reference_sparse_scatter(sparse_scatter.size(), 0.0);
+        for (size_t i = 0; i < this->count; ++i) {
+            for (size_t j = 0; j < pattern_length; ++j) {
+                size_t src_idx = this->pattern_gather[j] + this->delta_gather * i;
+                size_t dst_idx = this->pattern_scatter[j] + this->delta_scatter * i;
+                if (src_idx < sparse_gather.size() && dst_idx < reference_sparse_scatter.size()) {
+                    reference_sparse_scatter[dst_idx] = sparse_gather[src_idx];
+                }
+            }
+        }
+        
+        std::cout << "Expected first 5 scatter values: ";
+        for (size_t i = 0; i < 5 && i < reference_sparse_scatter.size(); i++) {
+            std::cout << reference_sparse_scatter[i] << " ";
+        }
+        std::cout << std::endl;
+        
+        std::cout << "Actual first 5 scatter values:   ";
+        for (size_t i = 0; i < 5 && i < sparse_scatter.size(); i++) {
+            std::cout << sparse_scatter[i] << " ";
+        }
+        std::cout << std::endl;
+        
+        // Check if values match (with BFloat16 tolerance)
+        const double tolerance = 0.01; // BFloat16 precision tolerance
+        size_t mismatches = 0;
+        for (size_t i = 0; i < reference_sparse_scatter.size() && i < sparse_scatter.size(); i++) {
+            if (std::abs(reference_sparse_scatter[i] - sparse_scatter[i]) > tolerance) {
+                mismatches++;
+                if (mismatches <= 5) {
+                    std::cout << "  Mismatch at index " << i << ": expected " 
+                              << reference_sparse_scatter[i] << ", got " << sparse_scatter[i] << std::endl;
+                }
+            }
+        }
+        
+        if (mismatches == 0) {
+            std::cout << "✓ Gather-Scatter kernel validation PASSED" << std::endl;
+        } else {
+            std::cout << "✗ Gather-Scatter kernel validation FAILED with " << mismatches << " mismatches" << std::endl;
+        }
     }
 }
 
