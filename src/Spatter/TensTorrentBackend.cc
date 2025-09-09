@@ -951,67 +951,66 @@ bool TensTorrentDevice::executeMultiScatterKernel(
         };
         
         // Allocate L1 buffers
-        auto l1_pattern_buffer = CreateBuffer(l1_pattern_config);
+        auto l1_pattern_buffer = CreateBuffer(l1_patter`````n_config);
         auto l1_pattern_scatter_buffer = CreateBuffer(l1_pattern_scatter_config);
         auto l1_sparse_buffer = CreateBuffer(l1_sparse_config);
         auto l1_dense_buffer = CreateBuffer(l1_dense_config);
         
-        // Compile-time buffer indices
-        constexpr uint32_t cb_pattern = 0;
-        constexpr uint32_t cb_pattern_scatter = 1;
-        constexpr uint32_t cb_sparse = 2;
-        constexpr uint32_t cb_dense = 3;
+        // Compile-time arguments for TensorAccessors
+        std::vector<uint32_t> compile_time_args;
+        TensorAccessorArgs(*pattern_buffer).append_to(compile_time_args);
+        TensorAccessorArgs(*pattern_scatter_buffer).append_to(compile_time_args);
+        TensorAccessorArgs(*sparse_buffer).append_to(compile_time_args);
+        TensorAccessorArgs(*dense_buffer).append_to(compile_time_args);
         
         // Path to the kernel source
         std::string kernel_path = "/storage/tt/tt-spatter/src/Spatter/kernels/multi_scatter_kernel.cpp";
         
-        // Create kernels for all cores
-        for (const auto& core_group : {core_group_1, core_group_2}) {
-            if (!core_group.ranges().empty()) {
-                // Compile-time arguments
-                std::vector<uint32_t> compile_args = {
-                    cb_pattern,
-                    cb_pattern_scatter, 
-                    cb_sparse,
-                    cb_dense
-                };
-                
-                auto kernel = CreateKernel(
-                    multi_scatter_program,
-                    kernel_path,
-                    core_group,
-                    DataMovementConfig{
-                        .processor = DataMovementProcessor::RISCV_0,
-                        .noc = NOC::RISCV_0_default,
-                        .compile_args = compile_args,
-                        .defines = {}
-                    }
-                );
-                
-                // Runtime arguments for each core in the group
-                uint32_t curr_element = 0;
-                uint32_t elements_per_core = (core_group == core_group_1) ? 
-                    elements_per_core_group_1 : elements_per_core_group_2;
-                
-                for (const auto& core : corerange_to_cores(core_group, std::nullopt, row_major)) {
-                    uint32_t start_element = curr_element;
-                    uint32_t end_element = std::min(curr_element + elements_per_core, num_elements);
+        // Create kernel on all cores
+        KernelHandle multi_scatter_kernel_id = CreateKernel(
+            multi_scatter_program,
+            kernel_path,
+            all_cores,
+            DataMovementConfig{
+                .processor = DataMovementProcessor::RISCV_0,
+                .noc = NOC::RISCV_0_default,
+                .compile_args = compile_time_args,
+                .defines = {}
+            }
+        );
+        
+        // Set runtime arguments per core
+        uint32_t start_element = 0;
+        auto work_groups = {
+            std::make_pair(core_group_1, elements_per_core_group_1),
+            std::make_pair(core_group_2, elements_per_core_group_2)
+        };
+        
+        for (const auto& [group, elements_per_core] : work_groups) {
+            for (const auto& range : group.ranges()) {
+                for (const auto& core : range) {
+                    uint32_t end_element = std::min(start_element + elements_per_core, num_elements);
                     
-                    SetRuntimeArgs(multi_scatter_program, kernel, core, {
-                        sparse_buffer->address(),
-                        dense_buffer->address(),
-                        pattern_buffer->address(),
-                        pattern_scatter_buffer->address(),
-                        start_element,
-                        end_element,
-                        pattern_length,
-                        delta,
-                        count,
-                        wrap,
-                        sparse_size_elements
-                    });
+                    const std::vector<uint32_t> runtime_args = {
+                        l1_pattern_buffer->address(),        // arg0: pattern L1 buffer
+                        l1_pattern_scatter_buffer->address(), // arg1: pattern_scatter L1 buffer
+                        l1_sparse_buffer->address(),         // arg2: sparse L1 buffer
+                        l1_dense_buffer->address(),          // arg3: dense L1 buffer
+                        start_element,                       // arg4: start element for this core
+                        end_element,                         // arg5: end element for this core
+                        pattern_length,                      // arg6: pattern length
+                        delta,                               // arg7: delta
+                        count,                               // arg8: count (iterations)
+                        wrap,                                // arg9: wrap parameter
+                        sparse_size_elements,                // arg10: sparse buffer size
+                        pattern_buffer->address(),           // arg11: pattern DRAM buffer
+                        pattern_scatter_buffer->address(),   // arg12: pattern_scatter DRAM buffer
+                        sparse_buffer->address(),            // arg13: sparse DRAM buffer
+                        dense_buffer->address()              // arg14: dense DRAM buffer
+                    };
                     
-                    curr_element = end_element;
+                    SetRuntimeArgs(multi_scatter_program, multi_scatter_kernel_id, core, runtime_args);
+                    start_element = end_element;
                 }
             }
         }
