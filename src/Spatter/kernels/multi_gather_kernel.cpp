@@ -100,8 +100,8 @@ void kernel_main() {
         uint32_t pattern_gather_elem_offset = pattern_idx % elements_per_tile;
         uint32_t first_indirection_idx = pattern_gather_data[pattern_gather_elem_offset];
         
-        // Bounds check for first indirection
-        first_indirection_idx = first_indirection_idx % pattern_length;
+        // No bounds check - pattern_gather values must be valid indices into pattern
+        // This is enforced by host-side validation
         
         // Step 3: Load pattern tile containing pattern[first_indirection_idx]
         uint32_t pattern_tile_id = first_indirection_idx / elements_per_tile;

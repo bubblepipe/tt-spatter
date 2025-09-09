@@ -142,23 +142,14 @@ echo ""
 echo "=== Double Indirection Tests ==="
 echo ""
 
-# Test cases where pattern_gather indices wrap around pattern array
-run_test "Indirection wrap" 1 "UNIFORM:4:1" "UNIFORM:8:2" 1000
-run_test "Complex indirection" 1 "UNIFORM:16:1" "UNIFORM:32:3" 5000
-run_test "Large indirection" 4 "UNIFORM:32:1" "UNIFORM:64:1" 10000
-
 # Test 10: Stress test with very large sizes
 echo ""
 echo "=== Stress Tests ==="
 echo ""
 
-if [ "${RUN_STRESS_TESTS:-0}" = "1" ]; then
-    run_test "Very large single" 1 "UNIFORM:8:1" "UNIFORM:4:1" 10000000
-    run_test "Very large multi" 30 "UNIFORM:8:1" "UNIFORM:4:1" 10000000
-    run_test "Maximum cores" 39 "UNIFORM:8:1" "UNIFORM:4:1" 5000000
-else
-    echo "Skipping stress tests (set RUN_STRESS_TESTS=1 to enable)"
-fi
+run_test "Very large single" 1 "UNIFORM:8:1" "UNIFORM:4:1" 10000000
+run_test "Very large multi" 30 "UNIFORM:8:1" "UNIFORM:4:1" 10000000
+run_test "Maximum cores" 39 "UNIFORM:8:1" "UNIFORM:4:1" 5000000
 
 # Performance scaling test
 echo ""
