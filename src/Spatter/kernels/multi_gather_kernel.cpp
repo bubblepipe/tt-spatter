@@ -5,12 +5,39 @@
 #include "dataflow_api.h"
 #include "debug/dprint.h"
 
+/*
+ * Multi-Gather Kernel for Spatter TensTorrent Backend (Multi-Core)
+ * 
+ * Implements: dense[j + pattern_length * (i % wrap)] = sparse[pattern[pattern_gather[j]] + delta * i]
+ * 
+ * This is a double indirection gather:
+ * 1. pattern_gather[j] gives an index into the pattern array
+ * 2. pattern[pattern_gather[j]] gives the actual sparse array index
+ * 
+ * Runtime Args:
+ * - arg0: pattern_l1_addr - Pattern L1 buffer address
+ * - arg1: pattern_gather_l1_addr - Pattern gather L1 buffer address (first indirection)
+ * - arg2: sparse_l1_addr - Sparse L1 buffer address (source)
+ * - arg3: dense_l1_addr - Dense L1 buffer address (destination)
+ * - arg4: start_element - Starting element index for this core
+ * - arg5: end_element - Ending element index for this core
+ * - arg6: pattern_length - Length of the pattern arrays
+ * - arg7: delta - Stride for sparse access
+ * - arg8: count - Number of pattern iterations
+ * - arg9: wrap - Wrap parameter for dense buffer indexing
+ * - arg10: sparse_size_elements - Total size of sparse buffer in elements
+ * - arg11: pattern_addr - Pattern buffer address (DRAM)
+ * - arg12: pattern_gather_addr - Pattern gather buffer address (DRAM)
+ * - arg13: sparse_addr - Sparse buffer address (DRAM)
+ * - arg14: dense_addr - Dense buffer address (DRAM)
+ */
+
 void kernel_main() {
-    // Runtime arguments
-    uint32_t sparse_addr = get_arg_val<uint32_t>(0);
-    uint32_t dense_addr = get_arg_val<uint32_t>(1);
-    uint32_t pattern_addr = get_arg_val<uint32_t>(2);
-    uint32_t pattern_gather_addr = get_arg_val<uint32_t>(3);
+    // Read runtime arguments - four separate L1 buffers
+    uint32_t pattern_l1_addr = get_arg_val<uint32_t>(0);
+    uint32_t pattern_gather_l1_addr = get_arg_val<uint32_t>(1);
+    uint32_t sparse_l1_addr = get_arg_val<uint32_t>(2);
+    uint32_t dense_l1_addr = get_arg_val<uint32_t>(3);
     uint32_t start_element = get_arg_val<uint32_t>(4);
     uint32_t end_element = get_arg_val<uint32_t>(5);
     uint32_t pattern_length = get_arg_val<uint32_t>(6);
@@ -18,116 +45,121 @@ void kernel_main() {
     uint32_t count = get_arg_val<uint32_t>(8);
     uint32_t wrap = get_arg_val<uint32_t>(9);
     uint32_t sparse_size_elements = get_arg_val<uint32_t>(10);
-    
+    uint32_t pattern_addr = get_arg_val<uint32_t>(11);
+    uint32_t pattern_gather_addr = get_arg_val<uint32_t>(12);
+    uint32_t sparse_addr = get_arg_val<uint32_t>(13);
+    uint32_t dense_addr = get_arg_val<uint32_t>(14);
+
     // Early exit if no work to do
     if (start_element >= end_element) {
         return;
     }
+
+    // Tile constants
+    const uint32_t tile_size_bytes = 32 * 32 * 2;  // 2048 bytes per tile
+    const uint32_t elements_per_tile = 32 * 32;    // 1024 elements per tile
+
+    // Create TensorAccessors for all four buffers
+    constexpr auto pattern_args = TensorAccessorArgs<0>();
+    const auto pattern_accessor = TensorAccessor(pattern_args, pattern_addr, tile_size_bytes);
     
-    // Compile-time buffer indices
-    constexpr uint32_t cb_pattern = get_compile_time_arg_val(0);
-    constexpr uint32_t cb_pattern_gather = get_compile_time_arg_val(1);
-    constexpr uint32_t cb_sparse = get_compile_time_arg_val(2);
-    constexpr uint32_t cb_dense = get_compile_time_arg_val(3);
+    constexpr auto pattern_gather_args = TensorAccessorArgs<pattern_args.next_compile_time_args_offset()>();
+    const auto pattern_gather_accessor = TensorAccessor(pattern_gather_args, pattern_gather_addr, tile_size_bytes);
     
-    constexpr uint32_t tile_size_bytes = 2048;  // 32x32 BFloat16 elements
-    constexpr uint32_t elements_per_tile = 1024;  // 32x32
+    constexpr auto sparse_args = TensorAccessorArgs<pattern_gather_args.next_compile_time_args_offset()>();
+    const auto sparse_accessor = TensorAccessor(sparse_args, sparse_addr, tile_size_bytes);
     
-    // L1 buffer addresses for caching
-    uint32_t pattern_l1_addr = get_write_ptr(cb_pattern);
-    uint32_t pattern_gather_l1_addr = get_write_ptr(cb_pattern_gather);
-    uint32_t sparse_l1_addr = get_write_ptr(cb_sparse);
-    uint32_t dense_l1_addr = get_write_ptr(cb_dense);
-    
-    // Cache for tiles to minimize DRAM reads
-    uint32_t cached_pattern_tile_id = UINT32_MAX;
-    uint32_t cached_pattern_gather_tile_id = UINT32_MAX;
-    uint32_t cached_sparse_tile_id = UINT32_MAX;
-    uint32_t cached_dense_tile_id = UINT32_MAX;
-    
-    DPRINT << "Multi-gather kernel: processing elements " << start_element << " to " << end_element << ENDL();
-    DPRINT << "Pattern length: " << pattern_length << ", delta: " << delta << ", count: " << count << ", wrap: " << wrap << ENDL();
-    
+    constexpr auto dense_args = TensorAccessorArgs<sparse_args.next_compile_time_args_offset()>();
+    const auto dense_accessor = TensorAccessor(dense_args, dense_addr, tile_size_bytes);
+
+    // Track cached tiles to avoid redundant loads
+    uint32_t cached_pattern_gather_tile = UINT32_MAX;
+    uint32_t cached_pattern_tile = UINT32_MAX;
+    uint32_t cached_sparse_tile = UINT32_MAX;
+    uint32_t cached_dense_tile = UINT32_MAX;
+
     // Process elements assigned to this core
     for (uint32_t elem_idx = start_element; elem_idx < end_element; elem_idx++) {
-        uint32_t j = elem_idx % pattern_length;
-        uint32_t i = elem_idx / pattern_length;
+        // Calculate j and i for the current element
+        uint32_t j = elem_idx % count;
+        uint32_t i = elem_idx / count;
         
-        // Load pattern_gather tile if needed
-        uint32_t pattern_gather_tile_id = j / elements_per_tile;
-        if (pattern_gather_tile_id != cached_pattern_gather_tile_id) {
-            uint32_t pattern_gather_tile_addr = pattern_gather_addr + pattern_gather_tile_id * tile_size_bytes;
-            noc_async_read(get_noc_addr(pattern_gather_tile_addr), pattern_gather_l1_addr, tile_size_bytes);
+        // Calculate pattern index with wrap
+        uint32_t pattern_idx = j % pattern_length;
+        
+        // Step 1: Load pattern_gather tile if needed
+        uint32_t pattern_gather_tile_id = pattern_idx / elements_per_tile;
+        if (pattern_gather_tile_id != cached_pattern_gather_tile) {
+            noc_async_read_tile(pattern_gather_tile_id, pattern_gather_accessor, pattern_gather_l1_addr);
             noc_async_read_barrier();
-            cached_pattern_gather_tile_id = pattern_gather_tile_id;
+            cached_pattern_gather_tile = pattern_gather_tile_id;
         }
         
-        // Get pattern_gather[j] value
+        // Step 2: Get first indirection - pattern_gather[j] gives index into pattern array
         uint32_t* pattern_gather_data = reinterpret_cast<uint32_t*>(pattern_gather_l1_addr);
-        uint32_t pattern_gather_idx = pattern_gather_data[j % elements_per_tile];
+        uint32_t pattern_gather_elem_offset = pattern_idx % elements_per_tile;
+        uint32_t first_indirection_idx = pattern_gather_data[pattern_gather_elem_offset];
         
-        // Load pattern tile if needed
-        uint32_t pattern_tile_id = pattern_gather_idx / elements_per_tile;
-        if (pattern_tile_id != cached_pattern_tile_id) {
-            uint32_t pattern_tile_addr = pattern_addr + pattern_tile_id * tile_size_bytes;
-            noc_async_read(get_noc_addr(pattern_tile_addr), pattern_l1_addr, tile_size_bytes);
+        // Bounds check for first indirection
+        first_indirection_idx = first_indirection_idx % pattern_length;
+        
+        // Step 3: Load pattern tile containing pattern[first_indirection_idx]
+        uint32_t pattern_tile_id = first_indirection_idx / elements_per_tile;
+        if (pattern_tile_id != cached_pattern_tile) {
+            noc_async_read_tile(pattern_tile_id, pattern_accessor, pattern_l1_addr);
             noc_async_read_barrier();
-            cached_pattern_tile_id = pattern_tile_id;
+            cached_pattern_tile = pattern_tile_id;
         }
         
-        // Get pattern[pattern_gather[j]] value - double indirection
+        // Step 4: Get second indirection - pattern[pattern_gather[j]]
         uint32_t* pattern_data = reinterpret_cast<uint32_t*>(pattern_l1_addr);
-        uint32_t pattern_idx = pattern_data[pattern_gather_idx % elements_per_tile];
+        uint32_t pattern_elem_offset = first_indirection_idx % elements_per_tile;
+        uint32_t sparse_base_idx = pattern_data[pattern_elem_offset];
         
-        // Calculate source index in sparse array
-        uint32_t src_index = pattern_idx + (delta * i);
-        if (src_index >= sparse_size_elements) {
-            src_index = src_index % sparse_size_elements;
-        }
+        // Step 5: Calculate final sparse index with delta
+        uint32_t sparse_idx = (sparse_base_idx + delta * i) % sparse_size_elements;
         
-        // Load sparse tile if needed
-        uint32_t sparse_tile_id = src_index / elements_per_tile;
-        if (sparse_tile_id != cached_sparse_tile_id) {
-            uint32_t sparse_tile_addr = sparse_addr + sparse_tile_id * tile_size_bytes;
-            noc_async_read(get_noc_addr(sparse_tile_addr), sparse_l1_addr, tile_size_bytes);
+        // Step 6: Load sparse tile and read value
+        uint32_t sparse_tile_id = sparse_idx / elements_per_tile;
+        if (sparse_tile_id != cached_sparse_tile) {
+            noc_async_read_tile(sparse_tile_id, sparse_accessor, sparse_l1_addr);
             noc_async_read_barrier();
-            cached_sparse_tile_id = sparse_tile_id;
+            cached_sparse_tile = sparse_tile_id;
         }
         
-        // Read value from sparse array (using uint16_t for BFloat16)
         uint16_t* sparse_data = reinterpret_cast<uint16_t*>(sparse_l1_addr);
-        uint16_t src_value = sparse_data[src_index % elements_per_tile];
+        uint32_t sparse_elem_offset = sparse_idx % elements_per_tile;
+        uint16_t value = sparse_data[sparse_elem_offset];
         
-        // Calculate destination index in dense array
-        uint32_t dst_index = j + pattern_length * (i % wrap);
+        // Step 7: Calculate dense index with wrap
+        uint32_t dense_idx = j + pattern_length * (i % wrap);
         
-        // Load dense tile if different from cached
-        uint32_t dense_tile_id = dst_index / elements_per_tile;
-        if (dense_tile_id != cached_dense_tile_id) {
-            // Write back previous dense tile if we had one
-            if (cached_dense_tile_id != UINT32_MAX) {
-                uint32_t prev_dense_tile_addr = dense_addr + cached_dense_tile_id * tile_size_bytes;
-                noc_async_write(dense_l1_addr, get_noc_addr(prev_dense_tile_addr), tile_size_bytes);
+        // Step 8: Load dense tile if needed (for read-modify-write)
+        uint32_t dense_tile_id = dense_idx / elements_per_tile;
+        if (dense_tile_id != cached_dense_tile) {
+            // Write back previous dense tile if modified
+            if (cached_dense_tile != UINT32_MAX) {
+                noc_async_write_tile(cached_dense_tile, dense_accessor, dense_l1_addr);
                 noc_async_write_barrier();
             }
             
-            uint32_t dense_tile_addr = dense_addr + dense_tile_id * tile_size_bytes;
-            noc_async_read(get_noc_addr(dense_tile_addr), dense_l1_addr, tile_size_bytes);
+            // Load new dense tile
+            noc_async_read_tile(dense_tile_id, dense_accessor, dense_l1_addr);
             noc_async_read_barrier();
-            cached_dense_tile_id = dense_tile_id;
+            cached_dense_tile = dense_tile_id;
         }
         
-        // Write value to dense array (using uint16_t for BFloat16)
+        // Step 9: Write value to dense buffer
         uint16_t* dense_data = reinterpret_cast<uint16_t*>(dense_l1_addr);
-        dense_data[dst_index % elements_per_tile] = src_value;
+        uint32_t dense_elem_offset = dense_idx % elements_per_tile;
+        dense_data[dense_elem_offset] = value;
     }
     
-    // Write back the last dense tile if we modified any
-    if (cached_dense_tile_id != UINT32_MAX) {
-        uint32_t dense_tile_addr = dense_addr + cached_dense_tile_id * tile_size_bytes;
-        noc_async_write(dense_l1_addr, get_noc_addr(dense_tile_addr), tile_size_bytes);
+    // Write back the last modified dense tile
+    if (cached_dense_tile != UINT32_MAX) {
+        noc_async_write_tile(cached_dense_tile, dense_accessor, dense_l1_addr);
         noc_async_write_barrier();
     }
     
-    DPRINT << "Multi-gather kernel complete for core" << ENDL();
+    noc_async_writes_flushed();
 }
